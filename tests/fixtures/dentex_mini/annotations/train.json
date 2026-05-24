@@ -1,0 +1,19 @@
+{
+  "info": {"description": "DENTEX mini fixture", "version": "1.0"},
+  "licenses": [],
+  "categories": [
+    {"id": 0, "name": "Caries", "supercategory": "tooth"},
+    {"id": 1, "name": "Deep Caries", "supercategory": "tooth"},
+    {"id": 2, "name": "Periapical Lesion", "supercategory": "tooth"},
+    {"id": 3, "name": "Impacted", "supercategory": "tooth"}
+  ],
+  "images": [
+    {"id": 1, "file_name": "img_0001.png", "width": 16, "height": 16},
+    {"id": 2, "file_name": "img_0002.png", "width": 16, "height": 16}
+  ],
+  "annotations": [
+    {"id": 1, "image_id": 1, "category_id": 0, "bbox": [1, 1, 5, 5], "area": 25, "iscrowd": 0},
+    {"id": 2, "image_id": 1, "category_id": 2, "bbox": [8, 8, 4, 4], "area": 16, "iscrowd": 0},
+    {"id": 3, "image_id": 2, "category_id": 3, "bbox": [2, 3, 6, 6], "area": 36, "iscrowd": 0}
+  ]
+}

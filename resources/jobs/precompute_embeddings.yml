@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    precompute_embeddings:
+      name: "dais26_precompute_embeddings_${bundle.target}"
+      description: "Run C-RADIOv4 backbone over DENTEX to produce summary embeddings (dim=1152) in Delta + Vector Search index. AIR-only via serverless notebook task."
+      tags:
+        - key: "project"
+          value: "dais26-vfm"
+        - key: "component"
+          value: "embeddings"
+      max_retries: 1
+      timeout_seconds: 3600
+
+      # NO job_clusters block — AIR-only. Serverless notebook task; the notebook
+      # uses serverless GPU compute (single-GPU) for the embedding forward pass.
+      #
+      # Shared config (catalog / schema / backbone / backbone_revision) lives in
+      # notebooks/00_config.py and is pulled in via `%run ./00_config`.
+
+      tasks:
+        - task_key: "precompute"
+          notebook_task:
+            notebook_path: "../../notebooks/03_precompute_embeddings.py"
+            base_parameters:
+              batch_size: "32"
+          libraries:
+            - whl: "../../dist/*.whl"
