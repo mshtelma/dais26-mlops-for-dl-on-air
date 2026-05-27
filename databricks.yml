@@ -5,15 +5,6 @@ variables:
   sp_app_id:
     description: "Service principal application ID (UUID) for prod run_as. Created via 'databricks service-principals create --display-name dais26-vfm-sp'. Required for prod target."
     default: ""
-  scale_to_zero:
-    description: "Whether serving endpoints scale to zero when idle. ON for dev (cost safety), OFF for prod/demo (latency)."
-    default: "true"
-  train_epochs:
-    description: "Number of training epochs (job-level default)"
-    default: "10"
-  use_lora:
-    description: "Enable LoRA backbone training (STRETCH only)"
-    default: "false"
 
 artifacts:
   dais26_vfm_wheel:
@@ -41,12 +32,8 @@ targets:
   dev:
     mode: development
     default: true
-    variables:
-      scale_to_zero: "true"
 
   prod:
     mode: production
-    variables:
-      scale_to_zero: "false"
     run_as:
       service_principal_name: "${var.sp_app_id}"

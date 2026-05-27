@@ -77,11 +77,11 @@ class RetinaNetHead(nn.Module):
             x = features[key]
             b = x.shape[0]
             # Classification path
-            c = self.cls_logits(self.cls_subnet(x))      # (B, A*C, H, W)
+            c = self.cls_logits(self.cls_subnet(x))  # (B, A*C, H, W)
             c = c.permute(0, 2, 3, 1).reshape(b, -1, self.num_classes)
             all_cls.append(c)
             # Regression path
-            r = self.box_pred(self.box_subnet(x))         # (B, A*4, H, W)
+            r = self.box_pred(self.box_subnet(x))  # (B, A*4, H, W)
             r = r.permute(0, 2, 3, 1).reshape(b, -1, 4)
             all_box.append(r)
         cls_out = torch.cat(all_cls, dim=1) if all_cls else torch.empty(0)
@@ -112,7 +112,7 @@ class AnchorGenerator(nn.Module):
         ys = torch.arange(grid_h, device=device) * stride + stride / 2
         xs = torch.arange(grid_w, device=device) * stride + stride / 2
         grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-        centers = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)   # (H*W, 2)
+        centers = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)  # (H*W, 2)
 
         anchor_sizes: list[tuple[float, float]] = []
         for s in self.scales:
@@ -120,11 +120,11 @@ class AnchorGenerator(nn.Module):
                 w = float(s) * math.sqrt(r)
                 h = float(s) / math.sqrt(r)
                 anchor_sizes.append((w, h))
-        sizes = torch.tensor(anchor_sizes, device=device)               # (A, 2)
+        sizes = torch.tensor(anchor_sizes, device=device)  # (A, 2)
         a = sizes.shape[0]
 
         # Broadcast: (H*W, A, 4)
-        centers_exp = centers.unsqueeze(1).expand(-1, a, -1)             # (H*W, A, 2)
+        centers_exp = centers.unsqueeze(1).expand(-1, a, -1)  # (H*W, A, 2)
         sizes_exp = sizes.unsqueeze(0).expand(centers.shape[0], -1, -1)  # (H*W, A, 2)
         x1 = centers_exp[..., 0] - sizes_exp[..., 0] / 2
         y1 = centers_exp[..., 1] - sizes_exp[..., 1] / 2
@@ -206,7 +206,7 @@ class DetectionModel(nn.Module):
         max_detections: int = 100,
     ) -> None:
         super().__init__()
-        from src.models.adapters import FPNAdapter
+        from dais26_dentex.models.adapters import FPNAdapter
 
         self.backbone = backbone
         self.fpn = FPNAdapter(in_channels=spatial_dim, out_channels=256)
@@ -284,7 +284,7 @@ class DetectionModel(nn.Module):
         """Load a serialized DetectionModel from MLflow UC registry.
 
         Note: this returns the inner DetectionModel; the MLflow pyfunc wrapper lives in
-        src/serve/detector_pyfunc.py.
+        src/dais26_dentex/serve/detector_pyfunc.py.
         """
         import mlflow
 

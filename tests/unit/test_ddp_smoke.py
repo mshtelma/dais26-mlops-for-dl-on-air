@@ -6,6 +6,7 @@ Spawns 2 worker processes via torch.multiprocessing and verifies:
   - unwrap_model(ddp_model).state_dict() keys do NOT have a "module." prefix
   - teardown_distributed cleans up
 """
+
 from __future__ import annotations
 
 import os
@@ -17,7 +18,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 
-from src.train.distributed_utils import (
+from dais26_dentex.train.distributed_utils import (
     is_distributed,
     setup_distributed,
     teardown_distributed,
@@ -53,7 +54,10 @@ def _worker(rank: int, world_size: int, tmpfile: str):
 
     model = TinyHead().to(device)
     ddp = nn.parallel.DistributedDataParallel(
-        model, device_ids=None, find_unused_parameters=True, broadcast_buffers=False,
+        model,
+        device_ids=None,
+        find_unused_parameters=True,
+        broadcast_buffers=False,
     )
     x = torch.randn(8, 4, device=device)
     y = torch.randint(0, 2, (8,), device=device)

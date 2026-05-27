@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from src.drift.inference_table_reader import parse_request_payload
+from dais26_dentex.drift.inference_table_reader import parse_request_payload
 
 
 def _b64(data: bytes) -> str:
@@ -69,7 +69,7 @@ def test_invalid_base64_returns_empty(caplog: pytest.LogCaptureFixture) -> None:
     )
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="src.drift.inference_table_reader"):
+    with caplog.at_level(logging.WARNING, logger="dais26_dentex.drift.inference_table_reader"):
         result = parse_request_payload(payload)
     assert result == []
     assert any("Invalid base64" in msg for msg in caplog.messages)
@@ -80,7 +80,7 @@ def test_unknown_schema_returns_empty(caplog: pytest.LogCaptureFixture) -> None:
     payload = json.dumps({"foo": "bar"})
     import logging
 
-    with caplog.at_level(logging.WARNING, logger="src.drift.inference_table_reader"):
+    with caplog.at_level(logging.WARNING, logger="dais26_dentex.drift.inference_table_reader"):
         result = parse_request_payload(payload)
     assert result == []
     assert any("Unknown request schema" in msg for msg in caplog.messages)

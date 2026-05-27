@@ -24,30 +24,41 @@ class _FakeBackbone(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b = x.shape[0]
-        return torch.randn(b, self.summary_dim) * 5.0, torch.zeros(b, 4, 1536)
+        return torch.randn(b, self.summary_dim) * 5.0, torch.zeros(b, 4, 1152)
 
 
 @pytest.fixture
 def embedder_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
     backbone_config = tmp_path / "backbone_config.json"
-    backbone_config.write_text(json.dumps({
-        "name": "fake_backbone", "revision": None,
-        "summary_dim": 1152, "spatial_dim": 1536, "patch_size": 16,
-    }))
-    from src.models.backbones import BackboneInfo
+    backbone_config.write_text(
+        json.dumps(
+            {
+                "name": "fake_backbone",
+                "revision": None,
+                "summary_dim": 1152,
+                "spatial_dim": 1152,
+                "patch_size": 16,
+            }
+        )
+    )
+    from dais26_dentex.models.backbones import BackboneInfo
 
     def fake_load(name, revision=None, cache_dir=None, device="cpu"):
         return _FakeBackbone(), BackboneInfo(
-            name=name, summary_dim=1152, spatial_dim=1536,
-            patch_size=16, model_name="fake", revision=revision,
+            name=name,
+            summary_dim=1152,
+            spatial_dim=1152,
+            patch_size=16,
+            model_name="fake",
+            revision=revision,
         )
 
-    monkeypatch.setattr("src.models.backbones.load_backbone", fake_load)
+    monkeypatch.setattr("dais26_dentex.models.backbones.load_backbone", fake_load)
     return {"backbone_config": str(backbone_config)}
 
 
 def test_embedder_output_dim_and_norm(embedder_artifacts):
-    from src.serve.embedder_pyfunc import EmbedderPyfunc
+    from dais26_dentex.serve.embedder_pyfunc import EmbedderPyfunc
 
     pyfunc = EmbedderPyfunc()
     ctx = MagicMock()
@@ -65,7 +76,7 @@ def test_embedder_output_dim_and_norm(embedder_artifacts):
 
 
 def test_embedder_batch(embedder_artifacts):
-    from src.serve.embedder_pyfunc import EmbedderPyfunc
+    from dais26_dentex.serve.embedder_pyfunc import EmbedderPyfunc
 
     pyfunc = EmbedderPyfunc()
     ctx = MagicMock()
@@ -77,7 +88,7 @@ def test_embedder_batch(embedder_artifacts):
 
 
 def test_embedder_signature():
-    from src.serve.embedder_pyfunc import build_embedder_signature_and_example
+    from dais26_dentex.serve.embedder_pyfunc import build_embedder_signature_and_example
 
     sig, example = build_embedder_signature_and_example(summary_dim=1152)
     assert sig is not None

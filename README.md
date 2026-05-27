@@ -17,7 +17,7 @@ Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 
 | Job | Backbone output used | Purpose |
 |-----|----------------------|---------|
-| `train_detector` | `spatial_features` (dim 1536) | FPN + RetinaNet detection head on DENTEX |
+| `train_detector` | `spatial_features` (dim 1152) | FPN + RetinaNet detection head on DENTEX |
 | `precompute_embeddings` | `summary` (dim 1152) | Delta table + Mosaic AI Vector Search index |
 | `drift_monitor` | `summary` (dim 1152) | KNN-distance drift detection on detector traffic |
 
@@ -29,7 +29,7 @@ One C-RADIOv4 artifact in UC Volume. Three downstream consumers. Zero backbone g
 git clone <repo> && cd dais26-mlops-for-dl-on-air
 pip install uv && uv pip install -e ".[dev]"
 databricks auth login --host <DATABRICKS_HOST>
-uv build
+uv build                                       # ships pyproject.toml inside the wheel for serving-deps lookup
 databricks bundle deploy -t dev               # deploys UC + jobs (NOT endpoints)
 databricks bundle run train_detector -t dev   # trains + @candidate + endpoint via SDK + @champion
 databricks bundle run precompute_embeddings -t dev
@@ -51,7 +51,7 @@ trigger it. The decorator dispatches to the serverless GPU pool:
 
 ```python
 from serverless_gpu import distributed
-from src.train.train_detector import train_detector
+from dais26_dentex.train.train_detector import train_detector
 
 @distributed(gpus=8, gpu_type="h100")
 def run_train():
@@ -74,7 +74,7 @@ sgcli get runs --limit 10 -p dev
 sgcli get logs <run-id> --rank 0 -p dev
 ```
 
-Both paths share **one core** — `src/train/train_detector.py` — which is
+Both paths share **one core** — `src/dais26_dentex/train/train_detector.py` — which is
 distributed-aware (DistributedDataParallel with `find_unused_parameters=True`
 for the frozen backbone, rank-0-only MLflow + UC registration). See
 [sgcli/README.md](sgcli/README.md) for the terminal flow.
@@ -101,21 +101,42 @@ Endpoints are never created before a model version exists. See [docs/ARCHITECTUR
 ```
 dais26-mlops-for-dl-on-air/
 |-- databricks.yml          # DAB root manifest (UC + job resources; no endpoint YAML)
-|-- pyproject.toml          # Python deps (torch, transformers, mlflow, databricks-sdk, ...)
+|-- pyproject.toml          # Python deps + [tool.dais26.serving-deps] SoT for pyfunc
 |-- Makefile                # Developer shortcuts
 |-- src/
-|   |-- data/               # dentex_loader.py, transforms.py
-|   |-- models/             # backbones.py (BackboneInfo), adapters.py (FPN), detection_head.py
-|   |-- train/              # train_detector.py, precompute_embeddings.py
-|   |-- eval/               # coco_metrics.py
-|   |-- drift/              # embeddings.py, reference.py, monitor.py, inference_table_reader.py
-|   `-- serve/              # detector_pyfunc.py, embedder_pyfunc.py, endpoint_manager.py
-|-- notebooks/              # 00_setup .. 07_latency_benchmark (Databricks notebooks)
+|   `-- dais26_dentex/      # Importable Python package (src layout)
+|       |-- config/         # constants, manifest v2, TrainerConfig dataclass
+|       |-- data/           # dentex_loader.py, dataset.py, transforms.py
+|       |-- distributed/    # primitives (setup/safe_barrier/seed), barrier_dance (rank0_first)
+|       |-- drift/          # embeddings.py, reference.py, monitor.py, inference_table_reader.py
+|       |-- eval/           # coco_metrics.py
+|       |-- models/         # backbones (BackboneInfo), adapters (FPN), detection_head, builder, targets
+|       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
+|       |-- serve/          # detector_pyfunc.py, embedder_pyfunc.py, postprocess.py, endpoint_manager.py
+|       `-- train/          # trainer.py (Trainer class), losses, train_detector (thin shim), cli (sgcli entry)
+|-- notebooks/              # 00_config / 00_setup .. 07_latency_benchmark; widget-free, params via 00_config.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
+|-- sgcli/                  # Serverless GPU CLI workload (terminal launch path)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
 |-- tests/                  # unit/ and integration/ pytest suites
 `-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK
 ```
+
+## Engineering anchors (Phase 4 hardening)
+
+| Concern | Where it lives | Why |
+|---|---|---|
+| Artifact contract | `config/manifest.py` (v2 `manifest.json`) | Single file replaces v1's three sidecar JSONs; `version` first → `head -1` triages a model. |
+| Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass; same instance feeds the notebook `@distributed` path and the sgcli/torchrun YAML. |
+| Distributed primitives | `distributed/primitives.py` + `distributed/barrier_dance.py` | `safe_barrier` surfaces dead-rank deadlocks as `BarrierTimeoutError` instead of hanging on NCCL. `rank0_first` is sequence-matched and avoids the cold-cache HF download race. |
+| HF env hardening | `platform/hf_env.py::configure_hf_env` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` (UC Volume FUSE rejects parallel chunked writes). |
+| Pyfunc serving deps | `pyproject.toml::[tool.dais26.serving-deps]` ↔ `platform/mlflow_io.py::serving_pip_requirements` | One edit to add a runtime dep; the wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` so the lookup works in AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. |
+| MLflow API drift | `platform/mlflow_io.py::_log_model_artifact_kwarg` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature`. |
+| UC identifiers | `platform/uc.py::UCName`, `VolumePath` | Stop hand-rolling `f"{catalog}.{schema}.{name}"`; UC ident regex catches dotted-catalog typos. |
+| Notebook params | `notebooks/00_config.py` | All params live there; **no `dbutils.widgets`** and no DAB `base_parameters`. |
+
+Full rationale (race traces, alternatives considered, follow-ups) in
+[docs/RUNBOOK.md#engineering-rationale](docs/RUNBOOK.md#engineering-rationale).
 
 ## Licenses
 

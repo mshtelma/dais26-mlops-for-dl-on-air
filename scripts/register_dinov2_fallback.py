@@ -46,7 +46,7 @@ def main() -> int:
     # Step 1: Re-train head on DINOv2 (unless --use-baked-head)
     if not args.use_baked_head:
         log.info("Step 1/6: Training detector head on DINOv2-base (dim=768) ...")
-        from src.train.train_detector import train_detector
+        from dais26_dentex.train.train_detector import train_detector
 
         train_detector(
             catalog=args.catalog,
@@ -66,7 +66,7 @@ def main() -> int:
     from pyspark.sql import SparkSession
 
     spark = SparkSession.builder.getOrCreate()
-    from src.train.precompute_embeddings import precompute_embeddings
+    from dais26_dentex.train.precompute_embeddings import precompute_embeddings
 
     precompute_embeddings(
         spark=spark,
@@ -105,7 +105,7 @@ def main() -> int:
 
     # Step 5: Deploy endpoint serving the DINOv2 model + Step 6: promote @champion
     log.info("Step 5+6/6: Deploying endpoint + promoting to @champion")
-    from src.serve.endpoint_manager import deploy_and_smoke_test
+    from dais26_dentex.serve.endpoint_manager import deploy_and_smoke_test
 
     result = deploy_and_smoke_test(
         endpoint_name=args.endpoint_name,

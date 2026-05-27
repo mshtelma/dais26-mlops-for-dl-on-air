@@ -1,13 +1,14 @@
 """Verify rank-0 gating: simulate WORLD_SIZE=2 and assert mlflow.start_run
 is called only on RANK=0. We mock all heavy dependencies to keep the test fast.
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
 import pytest
 
-from src.train import train_detector as td_mod
+from dais26_dentex.train import train_detector as td_mod
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def mock_heavy_deps(monkeypatch):
     fake_info.patch_size = 16
 
     monkeypatch.setattr(
-        "src.models.backbones.load_backbone",
+        "dais26_dentex.models.backbones.load_backbone",
         lambda **kw: (fake_bb, fake_info),
     )
 
@@ -35,13 +36,16 @@ def mock_heavy_deps(monkeypatch):
             super().__init__()
             self.linear = nn.Linear(4, 4)
 
-        def to(self, *a, **kw): return self
-        def forward_train(self, x): pass
+        def to(self, *a, **kw):
+            return self
 
-    monkeypatch.setattr("src.models.detection_head.DetectionModel", FakeDetectionModel)
-    monkeypatch.setattr("src.models.detection_head.DEFAULT_ANCHOR_SCALES", [1])
-    monkeypatch.setattr("src.models.detection_head.DEFAULT_ASPECT_RATIOS", [1.0])
-    monkeypatch.setattr("src.models.peft.apply_lora", lambda m, **kw: m)
+        def forward_train(self, x):
+            pass
+
+    monkeypatch.setattr("dais26_dentex.models.detection_head.DetectionModel", FakeDetectionModel)
+    monkeypatch.setattr("dais26_dentex.models.detection_head.DEFAULT_ANCHOR_SCALES", [1])
+    monkeypatch.setattr("dais26_dentex.models.detection_head.DEFAULT_ASPECT_RATIOS", [1.0])
+    monkeypatch.setattr("dais26_dentex.models.peft.apply_lora", lambda m, **kw: m)
 
 
 def test_rank0_starts_mlflow_run(mock_heavy_deps, monkeypatch):
@@ -63,8 +67,9 @@ def test_rank0_starts_mlflow_run(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
     run_id = td_mod.train_detector(
-        catalog="c", schema="s",
-        volume_path=None,        # skip dataloaders for unit test
+        catalog="c",
+        schema="s",
+        volume_path=None,  # skip dataloaders for unit test
         epochs=0,
         register_model=False,
         set_candidate_alias=False,
@@ -78,14 +83,17 @@ def _stub_distributed(monkeypatch):
     """Stub out torch.distributed + DDP so train_detector's distributed branch
     doesn't need a real process group."""
     import torch.distributed as dist
+
     monkeypatch.setattr(dist, "init_process_group", MagicMock())
     monkeypatch.setattr(dist, "is_initialized", MagicMock(return_value=False))
     monkeypatch.setattr(dist, "barrier", MagicMock())
     monkeypatch.setattr(dist, "destroy_process_group", MagicMock())
     # Mock DDP wrap to be a pass-through identity function
     import torch.nn as nn
+
     monkeypatch.setattr(
-        nn.parallel, "DistributedDataParallel",
+        nn.parallel,
+        "DistributedDataParallel",
         lambda m, **kw: m,
     )
 
@@ -109,7 +117,8 @@ def test_non_rank0_does_not_start_mlflow_run(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
     run_id = td_mod.train_detector(
-        catalog="c", schema="s",
+        catalog="c",
+        schema="s",
         volume_path=None,
         epochs=0,
         register_model=False,
@@ -137,9 +146,13 @@ def test_set_registry_uri_only_on_rank0(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
     td_mod.train_detector(
-        catalog="c", schema="s", volume_path=None, epochs=0,
+        catalog="c",
+        schema="s",
+        volume_path=None,
+        epochs=0,
         experiment_name="/Shared/exp",
-        register_model=False, set_candidate_alias=False,
+        register_model=False,
+        set_candidate_alias=False,
     )
 
     # On non-rank-0, these MLflow setup calls must not fire

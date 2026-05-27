@@ -50,7 +50,7 @@ jobs:
         run: |
           python3 -m venv /tmp/wheel_test
           /tmp/wheel_test/bin/pip install dist/*.whl
-          /tmp/wheel_test/bin/python -c "import src; print(src.__version__)"
+          /tmp/wheel_test/bin/python -c "import dais26_dentex; print(dais26_dentex.__version__)"
 
   dab-validate:
     runs-on: ubuntu-latest

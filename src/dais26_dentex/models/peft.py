@@ -18,7 +18,7 @@ def find_target_modules(backbone: nn.Module, patterns: Iterable[str] = ("qkv", "
     for name, module in backbone.named_modules():
         if not isinstance(module, nn.Linear):
             continue
-        leaf = name.rsplit('.', 1)[-1] if '.' in name else name
+        leaf = name.rsplit(".", 1)[-1] if "." in name else name
         if any(p in leaf for p in patterns):
             targets.append(name)
     return targets
@@ -50,9 +50,7 @@ def apply_lora(
     try:
         from peft import LoraConfig, get_peft_model
     except ImportError as e:
-        raise ImportError(
-            "peft library required for LoRA. Install: uv pip install 'peft>=0.14,<1.0'"
-        ) from e
+        raise ImportError("peft library required for LoRA. Install: uv pip install 'peft>=0.14,<1.0'") from e
 
     if target_modules is None:
         target_modules = find_target_modules(backbone, target_module_patterns)

@@ -9,8 +9,8 @@
 
 # COMMAND ----------
 # ---- Core UC config (edit here to switch environments) ----
-CATALOG = "ml_dev"
-SCHEMA = "dais26_vfm"
+CATALOG = "main"
+SCHEMA = "mshtelma"
 BACKBONE = "cradio_v4_so400m"
 BACKBONE_REVISION = "main"
 
@@ -51,14 +51,67 @@ VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}embeddings_index"
 
 # COMMAND ----------
 # ---- MLflow experiment ----
-_current_user = spark.sql("SELECT current_user()").collect()[0][0]
+# Use the dbutils notebook context (no spark — AIR workers don't have spark, and
+# the driver's spark.sql round-trip is unnecessary when dbutils gives us the
+# username directly).
+_current_user = (
+    dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
+)
 EXPERIMENT_NAME = f"/Users/{_current_user}/dais26-detector"
 
 # COMMAND ----------
-# ---- Backbone literals (canonical internal names for src.models.backbones) ----
+# ---- Backbone literals (canonical internal names for dais26_dentex.models.backbones) ----
 PRIMARY_BACKBONE = "cradio_v4_so400m"
 COMPARISON_BACKBONE = "dinov3_vitl16"
 FALLBACK_BACKBONE = "dinov2_base"
+
+# COMMAND ----------
+# ---- Notebook defaults (formerly dbutils widgets) ----
+# Edit these to change per-notebook behavior instead of using widget overrides.
+
+# 00_setup
+SP_APP_ID: str | None = None        # service principal app-ID (UUID); None skips UC grants
+HF_TOKEN: str | None = None         # set only if the DENTEX HF repo is gated
+
+# 01_explore_dentex
+EXPLORE_SPLIT = "train"             # train | val | test | drift_synthetic
+
+# 02_train_detector_air
+TRAIN_EPOCHS = 10
+TRAIN_LR = 1e-3
+TRAIN_BATCH_SIZE = 8
+TRAIN_USE_LORA = False
+TRAIN_LORA_RANK = 8
+TRAIN_LORA_ALPHA = 32.0
+TRAIN_GPUS = 8                      # passed to @distributed
+TRAIN_GPU_TYPE = "h100"             # "h100" | "a10"
+
+# 03_precompute_embeddings
+EMBEDDINGS_BATCH_SIZE = 32
+# Auto-sync the VS index after writing embeddings. Set BOTH to enable;
+# leave None to skip (create the VS index via 04 first, then enable here).
+EMBEDDINGS_VS_ENDPOINT: str | None = None
+EMBEDDINGS_VS_INDEX: str | None = None
+
+# 04_deploy_serving
+# register_and_set_candidate | deploy_and_smoke_test | create_vector_search
+DEPLOY_ACTION = "deploy_and_smoke_test"
+DEPLOY_WORKLOAD_TYPE = "GPU_SMALL"  # GPU_SMALL | GPU_MEDIUM | GPU_LARGE
+DEPLOY_WORKLOAD_SIZE = "Small"      # Small | Medium | Large
+DEPLOY_SCALE_TO_ZERO = True
+
+# 05_drift_demo
+DRIFT_MODE = "demo"                 # "demo" or "scheduled"
+DRIFT_KNN_K = 50
+DRIFT_ALERT_THRESHOLD = 2.0
+
+# 06_similarity_search_demo
+SIMILARITY_QUERY_COUNT = 50
+
+# 07_latency_benchmark
+LATENCY_NUM_REQUESTS = 1000
+LATENCY_WARMUP_REQUESTS = 20
+LATENCY_PIVOT_THRESHOLD_MS = 150.0
 
 # COMMAND ----------
 print(f"CATALOG          = {CATALOG}")

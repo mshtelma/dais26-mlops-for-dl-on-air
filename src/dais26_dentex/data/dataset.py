@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -10,6 +9,8 @@ import numpy as np
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+
+from .dentex_loader import load_canonical_split
 
 
 class DENTEXDetectionDataset(Dataset):
@@ -19,14 +20,16 @@ class DENTEXDetectionDataset(Dataset):
         volume_path: Root path of the DENTEX Unity Catalog Volume mount
             (e.g. ``/Volumes/<catalog>/dais26_vfm/dentex_raw``).
         split: One of ``train``, ``val``, ``test``, or ``drift_synthetic``.
-        transforms: Optional Albumentations ``Compose`` pipeline accepting
-            ``image``, ``bboxes`` (COCO format), and ``class_labels``.
+        transforms: Optional callable accepting keyword args ``image``,
+            ``bboxes`` (COCO ``[x, y, w, h]``), ``class_labels`` and returning
+            a dict with the transformed ``image`` (CHW tensor), ``bboxes``
+            (list of ``[x, y, w, h]``), and ``class_labels`` (list of int).
+            See ``dais26_dentex.data.transforms``.
     """
 
     def __init__(self, volume_path: str, split: str, transforms=None) -> None:
         self.images_dir = Path(volume_path) / "images" / split
-        with open(Path(volume_path) / "annotations" / f"{split}.json") as f:
-            coco = json.load(f)
+        coco = load_canonical_split(volume_path, split)
         self.images: list[dict] = coco["images"]  # [{id, file_name, width, height}, ...]
         self.ann_by_img: dict[int, list] = defaultdict(list)
         for ann in coco["annotations"]:

@@ -7,39 +7,25 @@
 # MAGIC   runs smoke test, promotes to `@champion`. Uses create_and_wait / update_config_and_wait.
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown(
-    "action", "deploy_and_smoke_test",
-    ["register_and_set_candidate", "deploy_and_smoke_test", "create_vector_search"],
-)
-dbutils.widgets.text("model_name", DETECTOR_MODEL_SHORT)
-dbutils.widgets.text("endpoint_name", DETECTOR_ENDPOINT_NAME)
-dbutils.widgets.dropdown("workload_type", "GPU_SMALL", ["GPU_SMALL", "GPU_MEDIUM", "GPU_LARGE"])
-dbutils.widgets.dropdown("workload_size", "Small", ["Small", "Medium", "Large"])
-dbutils.widgets.dropdown("scale_to_zero", "true", ["true", "false"])
-dbutils.widgets.text("vs_endpoint_name", VS_ENDPOINT_NAME)
-dbutils.widgets.text("vs_index_name", "")
+full_model = f"{CATALOG}.{SCHEMA}.{DETECTOR_MODEL_SHORT}"
 
-action = dbutils.widgets.get("action")
-model_name = dbutils.widgets.get("model_name")
-endpoint_name = dbutils.widgets.get("endpoint_name")
-workload_type = dbutils.widgets.get("workload_type")
-workload_size = dbutils.widgets.get("workload_size")
-scale_to_zero = dbutils.widgets.get("scale_to_zero") == "true"
-vs_endpoint_name = dbutils.widgets.get("vs_endpoint_name")
-vs_index_name = dbutils.widgets.get("vs_index_name").strip() or VS_INDEX_NAME
-full_model = f"{CATALOG}.{SCHEMA}.{model_name}"
-
-print(f"Action: {action}")
+print(f"Action: {DEPLOY_ACTION}")
 print(f"Model: {full_model}")
-print(f"Endpoint: {endpoint_name}")
+print(f"Endpoint: {DETECTOR_ENDPOINT_NAME}")
 
 # COMMAND ----------
 
-if action == "register_and_set_candidate":
+if DEPLOY_ACTION == "register_and_set_candidate":
     # The training task already registers + sets @candidate; verify it.
     import mlflow
     from mlflow.tracking import MlflowClient
@@ -56,19 +42,19 @@ if action == "register_and_set_candidate":
 
 # COMMAND ----------
 
-if action == "deploy_and_smoke_test":
-    from src.serve.endpoint_manager import deploy_and_smoke_test
+if DEPLOY_ACTION == "deploy_and_smoke_test":
+    from dais26_dentex.serve.endpoint_manager import deploy_and_smoke_test
 
     result = deploy_and_smoke_test(
-        endpoint_name=endpoint_name,
+        endpoint_name=DETECTOR_ENDPOINT_NAME,
         catalog=CATALOG,
         schema=SCHEMA,
-        model_name=model_name,
-        workload_type=workload_type,
-        workload_size=workload_size,
-        scale_to_zero=scale_to_zero,
+        model_name=DETECTOR_MODEL_SHORT,
+        workload_type=DEPLOY_WORKLOAD_TYPE,
+        workload_size=DEPLOY_WORKLOAD_SIZE,
+        scale_to_zero=DEPLOY_SCALE_TO_ZERO,
         ai_gateway_enabled=True,
-        inference_table_prefix=f"{model_name}_inference",
+        inference_table_prefix=f"{DETECTOR_MODEL_SHORT}_inference",
         promote_on_success=True,
         timeout_seconds=900,
     )
@@ -80,7 +66,7 @@ if action == "deploy_and_smoke_test":
 
 # COMMAND ----------
 
-if action == "create_vector_search":
+if DEPLOY_ACTION == "create_vector_search":
     from databricks.sdk import WorkspaceClient
 
     w = WorkspaceClient()
@@ -88,22 +74,22 @@ if action == "create_vector_search":
     # Create endpoint (if not exists)
     try:
         w.vector_search_endpoints.create_endpoint_and_wait(
-            name=vs_endpoint_name, endpoint_type="STANDARD",
+            name=VS_ENDPOINT_NAME, endpoint_type="STANDARD",
         )
-        print(f"Created VS endpoint: {vs_endpoint_name}")
+        print(f"Created VS endpoint: {VS_ENDPOINT_NAME}")
     except Exception as e:
         if "already exists" in str(e).lower():
-            print(f"VS endpoint {vs_endpoint_name} already exists")
+            print(f"VS endpoint {VS_ENDPOINT_NAME} already exists")
         else:
             raise
 
     # Create Delta Sync index with precomputed embeddings (dim=1152 for C-RADIOv4)
     source_table = TRAIN_EMBEDDINGS_TABLE
-    print(f"Creating index {vs_index_name} from {source_table}")
+    print(f"Creating index {VS_INDEX_NAME} from {source_table}")
     try:
         w.vector_search_indexes.create_index(
-            name=vs_index_name,
-            endpoint_name=vs_endpoint_name,
+            name=VS_INDEX_NAME,
+            endpoint_name=VS_ENDPOINT_NAME,
             primary_key="image_id",
             index_type="DELTA_SYNC",
             delta_sync_index_spec={
@@ -114,10 +100,10 @@ if action == "create_vector_search":
                 "columns_to_sync": ["image_id", "diagnosis", "split"],
             },
         )
-        print(f"Created VS index: {vs_index_name}")
+        print(f"Created VS index: {VS_INDEX_NAME}")
     except Exception as e:
         if "already exists" in str(e).lower():
-            print(f"VS index {vs_index_name} already exists; syncing")
-            w.vector_search_indexes.sync_index(index_name=vs_index_name)
+            print(f"VS index {VS_INDEX_NAME} already exists; syncing")
+            w.vector_search_indexes.sync_index(index_name=VS_INDEX_NAME)
         else:
             raise

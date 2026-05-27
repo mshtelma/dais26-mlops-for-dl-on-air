@@ -569,7 +569,7 @@ wheels = [
 ]
 
 [[package]]
-name = "dais26-mlops-for-dl-on-air"
+name = "dais26-dentex"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -1,4 +1,4 @@
-"""Unit tests for src/data/transforms.py."""
+"""Unit tests for src/dais26_dentex/data/transforms.py."""
 
 from __future__ import annotations
 
@@ -9,8 +9,9 @@ import torch
 # get_train_transforms
 # ---------------------------------------------------------------------------
 
+
 def test_train_transforms_output_shape():
-    from src.data.transforms import get_train_transforms
+    from dais26_dentex.data.transforms import get_train_transforms
 
     tfm = get_train_transforms(img_size=1024)
     img = np.random.randint(0, 256, (1024, 1024, 3), dtype=np.uint8)
@@ -23,7 +24,7 @@ def test_train_transforms_output_shape():
 
 
 def test_train_transforms_output_dtype():
-    from src.data.transforms import get_train_transforms
+    from dais26_dentex.data.transforms import get_train_transforms
 
     tfm = get_train_transforms(img_size=1024)
     img = np.random.randint(0, 256, (1024, 1024, 3), dtype=np.uint8)
@@ -36,7 +37,7 @@ def test_train_transforms_output_dtype():
 
 
 def test_train_transforms_bboxes_nonempty():
-    from src.data.transforms import get_train_transforms
+    from dais26_dentex.data.transforms import get_train_transforms
 
     # Use a large bbox so it is not dropped by min_visibility filter
     tfm = get_train_transforms(img_size=1024)
@@ -53,8 +54,9 @@ def test_train_transforms_bboxes_nonempty():
 # get_val_transforms
 # ---------------------------------------------------------------------------
 
+
 def test_val_transforms_output_shape():
-    from src.data.transforms import get_val_transforms
+    from dais26_dentex.data.transforms import get_val_transforms
 
     tfm = get_val_transforms(img_size=1024)
     img = np.random.randint(0, 256, (1024, 1024, 3), dtype=np.uint8)
@@ -69,7 +71,7 @@ def test_val_transforms_output_shape():
 
 def test_val_transforms_deterministic():
     """Val transforms have no randomness - same input gives same output."""
-    from src.data.transforms import get_val_transforms
+    from dais26_dentex.data.transforms import get_val_transforms
 
     tfm = get_val_transforms(img_size=256)
     img = np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)
@@ -86,8 +88,9 @@ def test_val_transforms_deterministic():
 # get_train_transforms - smaller img_size for speed
 # ---------------------------------------------------------------------------
 
+
 def test_train_transforms_resize():
-    from src.data.transforms import get_train_transforms
+    from dais26_dentex.data.transforms import get_train_transforms
 
     tfm = get_train_transforms(img_size=64)
     img = np.random.randint(0, 256, (128, 128, 3), dtype=np.uint8)

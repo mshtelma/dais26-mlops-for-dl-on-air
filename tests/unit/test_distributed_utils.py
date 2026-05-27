@@ -1,4 +1,5 @@
-"""Tests for src.train.distributed_utils — env-var detection + unwrap_model."""
+"""Tests for dais26_dentex.train.distributed_utils — env-var detection + unwrap_model."""
+
 from __future__ import annotations
 
 import os
@@ -8,7 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.train import distributed_utils as du
+from dais26_dentex.train import distributed_utils as du
 
 
 def test_world_size_default():
@@ -71,7 +72,8 @@ def test_unwrap_model_with_module_attr():
     inner = nn.Linear(4, 4)
 
     class FakeDDP:
-        def __init__(self, mod): self.module = mod
+        def __init__(self, mod):
+            self.module = mod
 
     wrapped = FakeDDP(inner)
     assert du.unwrap_model(wrapped) is inner
@@ -95,6 +97,7 @@ def test_maybe_distributed_sampler_returns_sampler_when_distributed(monkeypatch)
     """DistributedSampler.__init__ asks dist for world_size/rank — mock those
     so the test doesn't need an actual process group."""
     import torch.distributed as dist
+
     ds = [(torch.zeros(3), 0) for _ in range(10)]
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: True)
@@ -103,6 +106,7 @@ def test_maybe_distributed_sampler_returns_sampler_when_distributed(monkeypatch)
     with patch.dict(os.environ, {"WORLD_SIZE": "2", "RANK": "0"}, clear=True):
         sampler = du.maybe_distributed_sampler(ds, shuffle=True)
     from torch.utils.data import DistributedSampler
+
     assert isinstance(sampler, DistributedSampler)
 
 
@@ -114,12 +118,14 @@ def test_setup_distributed_returns_cpu_device_without_cuda():
         device = du.setup_distributed()
     assert device.type == "cpu"
     import torch.distributed as dist
+
     assert not dist.is_initialized()
 
 
 def test_barrier_no_op_when_not_initialized():
     """barrier() must be a no-op when no process group is initialized."""
     import torch.distributed as dist
+
     assert not dist.is_initialized()
     du.barrier()  # should not raise
 
@@ -127,5 +133,6 @@ def test_barrier_no_op_when_not_initialized():
 def test_teardown_no_op_when_not_initialized():
     """teardown_distributed() must be a no-op when no process group is initialized."""
     import torch.distributed as dist
+
     assert not dist.is_initialized()
     du.teardown_distributed()  # should not raise

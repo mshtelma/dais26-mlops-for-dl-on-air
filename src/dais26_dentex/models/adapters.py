@@ -24,7 +24,7 @@ class FPNAdapter(nn.Module):
         6. P6 = 3x3 stride-2 conv from P5 (1/64 scale)
 
     Notes:
-        - in_channels must come from BackboneInfo.spatial_dim (1536 for C-RADIOv4, 768 for DINOv2).
+        - in_channels must come from BackboneInfo.spatial_dim (1152 for C-RADIOv4-SO400M, 768 for DINOv2).
         - GroupNorm (NOT BatchNorm) to handle batch-size-1 inference.
     """
 
@@ -75,7 +75,7 @@ class FPNAdapter(nn.Module):
         p4 = lat
 
         # P3: 2x upsample + refine (1/8 scale)
-        p3_up = functional.interpolate(lat, scale_factor=2, mode='bilinear', align_corners=False)
+        p3_up = functional.interpolate(lat, scale_factor=2, mode="bilinear", align_corners=False)
         p3 = self.p3_refine(p3_up)
 
         # P5: stride-2 down from P4 (1/32 scale)
@@ -84,4 +84,4 @@ class FPNAdapter(nn.Module):
         # P6: stride-2 down from P5 (1/64 scale)
         p6 = self.p6_down(p5)
 
-        return {'p3': p3, 'p4': p4, 'p5': p5, 'p6': p6}
+        return {"p3": p3, "p4": p4, "p5": p5, "p6": p6}

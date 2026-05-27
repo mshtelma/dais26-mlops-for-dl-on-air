@@ -5,21 +5,17 @@
 # MAGIC table as ARRAY<FLOAT> with CDF enabled. Optionally creates / syncs the Vector Search index.
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------
 
-dbutils.widgets.text("batch_size", "32")
-dbutils.widgets.text("vs_endpoint", "")
-dbutils.widgets.text("vs_index", "")
-
-batch_size = int(dbutils.widgets.get("batch_size"))
-vs_endpoint = dbutils.widgets.get("vs_endpoint").strip() or None
-vs_index = dbutils.widgets.get("vs_index").strip() or VS_INDEX_NAME
-
-# COMMAND ----------
-
-from src.train.precompute_embeddings import precompute_embeddings
+from dais26_dentex.train.precompute_embeddings import precompute_embeddings
 
 n = precompute_embeddings(
     spark=spark,
@@ -29,9 +25,9 @@ n = precompute_embeddings(
     backbone_name=BACKBONE,  # type: ignore[arg-type]
     backbone_revision=BACKBONE_REVISION,
     cache_dir=CACHE_DIR,
-    batch_size=batch_size,
-    vector_search_endpoint=vs_endpoint,
-    vector_search_index=vs_index,
+    batch_size=EMBEDDINGS_BATCH_SIZE,
+    vector_search_endpoint=EMBEDDINGS_VS_ENDPOINT,
+    vector_search_index=EMBEDDINGS_VS_INDEX,
 )
 print(f"Wrote {n} embeddings")
 

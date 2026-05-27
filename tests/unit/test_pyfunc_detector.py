@@ -20,7 +20,7 @@ def _make_png_b64() -> str:
 class _FakeBackbone(nn.Module):
     """Stand-in for C-RADIOv4 returning (summary, spatial)."""
 
-    def __init__(self, summary_dim: int = 1152, spatial_dim: int = 1536, patch_size: int = 16):
+    def __init__(self, summary_dim: int = 1152, spatial_dim: int = 1152, patch_size: int = 16):
         super().__init__()
         self.summary_dim = summary_dim
         self.spatial_dim = spatial_dim
@@ -35,11 +35,11 @@ class _FakeBackbone(nn.Module):
 @pytest.fixture
 def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
     """Build a minimal artifacts bundle for DetectorPyfunc.load_context."""
-    from src.models.detection_head import DetectionModel
+    from dais26_dentex.models.detection_head import DetectionModel
 
     model = DetectionModel(
         backbone=_FakeBackbone(),
-        spatial_dim=1536,
+        spatial_dim=1152,
         num_classes=4,
         scales=[16, 32, 64, 128],
         aspect_ratios=[0.5, 1.0, 2.0],
@@ -49,43 +49,59 @@ def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
     torch.save(model.state_dict(), state_path)
 
     backbone_config = tmp_path / "backbone_config.json"
-    backbone_config.write_text(json.dumps({
-        "name": "fake_backbone",
-        "revision": None,
-        "summary_dim": 1152,
-        "spatial_dim": 1536,
-        "patch_size": 16,
-    }))
+    backbone_config.write_text(
+        json.dumps(
+            {
+                "name": "fake_backbone",
+                "revision": None,
+                "summary_dim": 1152,
+                "spatial_dim": 1152,
+                "patch_size": 16,
+            }
+        )
+    )
 
     detection_config = tmp_path / "detection_config.json"
-    detection_config.write_text(json.dumps({
-        "num_classes": 4,
-        "scales": [16, 32, 64, 128],
-        "aspect_ratios": [0.5, 1.0, 2.0],
-        "score_threshold": 0.05,
-        "nms_iou_threshold": 0.5,
-        "max_detections": 100,
-        "input_size": 64,
-    }))
+    detection_config.write_text(
+        json.dumps(
+            {
+                "num_classes": 4,
+                "scales": [16, 32, 64, 128],
+                "aspect_ratios": [0.5, 1.0, 2.0],
+                "score_threshold": 0.05,
+                "nms_iou_threshold": 0.5,
+                "max_detections": 100,
+                "input_size": 64,
+            }
+        )
+    )
 
     label_map = tmp_path / "label_map.json"
-    label_map.write_text(json.dumps({
-        "0": "Caries",
-        "1": "Deep Caries",
-        "2": "Periapical Lesion",
-        "3": "Impacted",
-    }))
+    label_map.write_text(
+        json.dumps(
+            {
+                "0": "Caries",
+                "1": "Deep Caries",
+                "2": "Periapical Lesion",
+                "3": "Impacted",
+            }
+        )
+    )
 
     # Monkey-patch load_backbone to return our fake
-    from src.models.backbones import BackboneInfo
+    from dais26_dentex.models.backbones import BackboneInfo
 
     def fake_load(name, revision=None, cache_dir=None, device="cpu"):
         return _FakeBackbone(), BackboneInfo(
-            name=name, summary_dim=1152, spatial_dim=1536,
-            patch_size=16, model_name="fake", revision=revision,
+            name=name,
+            summary_dim=1152,
+            spatial_dim=1152,
+            patch_size=16,
+            model_name="fake",
+            revision=revision,
         )
 
-    monkeypatch.setattr("src.models.backbones.load_backbone", fake_load)
+    monkeypatch.setattr("dais26_dentex.models.backbones.load_backbone", fake_load)
 
     return {
         "model_state": str(state_path),
@@ -96,7 +112,7 @@ def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
 
 
 def test_detector_predict_output_schema(detector_artifacts):
-    from src.serve.detector_pyfunc import DetectorPyfunc
+    from dais26_dentex.serve.detector_pyfunc import DetectorPyfunc
 
     pyfunc = DetectorPyfunc()
     ctx = MagicMock()
@@ -119,7 +135,7 @@ def test_detector_predict_output_schema(detector_artifacts):
 
 
 def test_detector_missing_image_column(detector_artifacts):
-    from src.serve.detector_pyfunc import DetectorPyfunc
+    from dais26_dentex.serve.detector_pyfunc import DetectorPyfunc
 
     pyfunc = DetectorPyfunc()
     ctx = MagicMock()
@@ -130,7 +146,7 @@ def test_detector_missing_image_column(detector_artifacts):
 
 
 def test_build_signature_and_example():
-    from src.serve.detector_pyfunc import build_signature_and_example
+    from dais26_dentex.serve.detector_pyfunc import build_signature_and_example
 
     sig, example = build_signature_and_example()
     assert sig is not None

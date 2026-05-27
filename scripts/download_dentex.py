@@ -27,7 +27,7 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger("download_dentex")
 
-    from src.data.dentex_loader import convert_to_coco, create_drift_split, download_dentex
+    from dais26_dentex.data.dentex_loader import convert_to_coco, create_drift_split, download_dentex
 
     log.info("Downloading DENTEX -> %s", args.volume_path)
     download_dentex(volume_path=args.volume_path, hf_token=args.hf_token)

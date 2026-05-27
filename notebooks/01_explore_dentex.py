@@ -4,30 +4,28 @@
 # MAGIC Sample images with annotations, class distribution, size stats.
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------
 
-dbutils.widgets.text("split", "train")
-split = dbutils.widgets.get("split")
-
-# COMMAND ----------
-
-import json
 from collections import Counter
 from pathlib import Path
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
-from src.data.dentex_loader import get_label_map
+from dais26_dentex.data.dentex_loader import get_label_map, load_canonical_split
 
 label_map = get_label_map()
 
 # COMMAND ----------
 
-ann_path = Path(VOLUME_PATH) / "annotations" / f"{split}.json"
-with open(ann_path) as f:
-    coco = json.load(f)
-print(f"Split: {split}")
+coco = load_canonical_split(VOLUME_PATH, EXPLORE_SPLIT)
+print(f"Split: {EXPLORE_SPLIT}")
 print(f"Images: {len(coco['images'])}, Annotations: {len(coco['annotations'])}, Categories: {len(coco['categories'])}")
 
 # COMMAND ----------
@@ -36,7 +34,7 @@ print(f"Images: {len(coco['images'])}, Annotations: {len(coco['annotations'])}, 
 cls_counts = Counter(label_map[a["category_id"]] for a in coco["annotations"])
 fig, ax = plt.subplots(figsize=(8, 4))
 ax.bar(cls_counts.keys(), cls_counts.values())
-ax.set_title(f"DENTEX {split} — class distribution")
+ax.set_title(f"DENTEX {EXPLORE_SPLIT} — class distribution")
 ax.set_ylabel("bbox count")
 plt.xticks(rotation=20)
 plt.tight_layout()
@@ -64,7 +62,7 @@ for a in coco["annotations"]:
 fig, axes = plt.subplots(2, 2, figsize=(12, 12))
 for ax, img_id in zip(axes.flat, sample_ids, strict=False):
     info = img_by_id[img_id]
-    p = Path(VOLUME_PATH) / "images" / split / info["file_name"]
+    p = Path(VOLUME_PATH) / "images" / EXPLORE_SPLIT / info["file_name"]
     img = Image.open(p).convert("RGB")
     draw = ImageDraw.Draw(img)
     for ann in anns_by_img.get(img_id, []):

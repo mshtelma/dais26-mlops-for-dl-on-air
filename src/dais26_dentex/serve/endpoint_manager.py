@@ -128,11 +128,7 @@ def deploy_and_smoke_test(
     logger.info("Previous @champion: %s", previous)
 
     # 3. Build served entity referencing NUMERIC version
-    workload_type_enum = (
-        ServingModelWorkloadType(workload_type)
-        if isinstance(workload_type, str)
-        else workload_type
-    )
+    workload_type_enum = ServingModelWorkloadType(workload_type) if isinstance(workload_type, str) else workload_type
     served_entity = ServedEntityInput(
         name=model_name,
         entity_name=full_model,
@@ -313,11 +309,7 @@ def rollback_to_previous_champion(
     client.set_registered_model_alias(name=full, alias="champion", version=previous_version)
     logger.info("Rolled @champion -> v%s", previous_version)
 
-    workload_type_enum = (
-        ServingModelWorkloadType(workload_type)
-        if isinstance(workload_type, str)
-        else workload_type
-    )
+    workload_type_enum = ServingModelWorkloadType(workload_type) if isinstance(workload_type, str) else workload_type
     # Update endpoint to serve that version
     w.serving_endpoints.update_config_and_wait(
         name=endpoint_name,

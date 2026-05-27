@@ -5,11 +5,12 @@ import torch.nn as nn
 # Skip the entire module if peft isn't installed (STRETCH dep)
 peft = pytest.importorskip("peft")
 
-from src.models.peft import apply_lora, find_target_modules, merge_lora_for_serving  # noqa: E402
+from dais26_dentex.models.peft import apply_lora, find_target_modules, merge_lora_for_serving  # noqa: E402
 
 
 class TinyAttention(nn.Module):
     """Synthetic 'attention block' with qkv + proj linear layers."""
+
     def __init__(self, dim: int = 64) -> None:
         super().__init__()
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
@@ -35,7 +36,7 @@ def test_find_target_modules_qkv_proj():
     targets = find_target_modules(bb, patterns=("qkv", "proj"))
     # Expect 4 hits: block1.qkv, block1.proj, block2.qkv, block2.proj
     assert len(targets) == 4
-    assert all('qkv' in t or 'proj' in t for t in targets)
+    assert all("qkv" in t or "proj" in t for t in targets)
 
 
 def test_find_target_modules_no_hits():
@@ -54,8 +55,7 @@ def test_apply_lora_trainable_count():
     assert trainable > 0
     # Base params should still be frozen
     base_trainable = sum(
-        p.numel() for n, p in peft_model.named_parameters()
-        if p.requires_grad and 'lora' not in n.lower()
+        p.numel() for n, p in peft_model.named_parameters() if p.requires_grad and "lora" not in n.lower()
     )
     assert base_trainable == 0, f"Non-LoRA params should be frozen, found {base_trainable} trainable"
 
@@ -73,7 +73,7 @@ def test_merge_lora_for_serving():
     peft_model = apply_lora(bb, rank=4, alpha=16.0)
     merged = merge_lora_for_serving(peft_model)
     # After merge, no LoRA params should remain trainable
-    lora_params = [n for n, _ in merged.named_parameters() if 'lora' in n.lower()]
+    lora_params = [n for n, _ in merged.named_parameters() if "lora" in n.lower()]
     assert len(lora_params) == 0, f"After merge, LoRA params should be gone: {lora_params}"
     # Forward should still work
     x = torch.randn(1, 4, 64)

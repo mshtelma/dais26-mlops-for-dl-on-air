@@ -1,16 +1,27 @@
-experiment_name: /Shared/dais26/detector-train
-run_name: cradio-v4-so400m-detector
+experiment_name: dais26-mlops-for-dl-on-air
+run_name: dais26-mlopsfordl-cradio-v4-so400m-detector
 
 environment:
   dependencies: requirements.yaml
-  env_variables:
-    NCCL_DEBUG: "INFO"
-    PYTHONUNBUFFERED: "1"
-    TORCH_DISTRIBUTED_DEBUG: "INFO"
-    OMP_NUM_THREADS: "1"
-  # Uncomment when switching backbone to gated DINOv3:
-  # env_variables_secrets:
-  #   HF_TOKEN: "dais26-secrets/hf-token"
+
+# sgcli moved env_variables / env_variables_secrets to the top level
+# (the nested form under `environment:` is deprecated as of v0.1.x).
+env_variables:
+  NCCL_DEBUG: "INFO"
+  PYTHONUNBUFFERED: "1"
+  TORCH_DISTRIBUTED_DEBUG: "INFO"
+  OMP_NUM_THREADS: "1"
+  # Disable hf_transfer (the parallel chunked downloader). On AIR + UC Volume
+  # cache_dir (FUSE), parallel writes fail with "Io: Input/output error (os
+  # error 5) (no permits available)" / "Io: Operation not supported (os error
+  # 95)". Set at process-env level so it's in place BEFORE Python imports
+  # huggingface_hub.constants (which caches the value once at import time).
+  # Falls back to the streaming downloader, which works on FUSE.
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  HF_HUB_DOWNLOAD_TIMEOUT: "600"
+# Uncomment when switching backbone to gated DINOv3:
+# env_variables_secrets:
+#   HF_TOKEN: "dais26-secrets/hf-token"
 
 compute:
   gpus: 8                          # 1 node (h100 = 8 GPUs/node); set 16 for 2-node scaling
@@ -23,26 +34,32 @@ code_source:
   type: snapshot
   snapshot:
     repo_path: ..                  # YAML lives in sgcli/ ; the repo root is one level up
-    git_branch: main               # uses local HEAD of main, no remote fetch
-    # For reproducible release runs, pin instead:
+    # Snapshot the working tree as-is (staged + unstaged changes included) so
+    # iterative local edits ship without a commit. sgcli enforces mutual
+    # exclusion: allow_uncommitted cannot be combined with git_branch /
+    # git_commit / use_remote_head. For reproducible release runs, set
+    # allow_uncommitted: false and uncomment git_commit below.
+    allow_uncommitted: true
     # git_commit: <40-char SHA>
 
+# Parameter values mirror notebooks/00_config.py so the sgcli and notebook
+# launch surfaces train against the exact same UC objects + hyperparameters.
 parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
-  catalog: dais26
-  schema: vfm
-  backbone_name: cradio_v4_so400m  # internal literal (NOT the HF id)
-  backbone_revision: null
-  volume_path: /Volumes/dais26/vfm/dentex_raw
-  cache_dir: /Volumes/dais26/vfm/model_cache
-  epochs: 10
-  lr: 0.001
-  batch_size: 8
-  num_workers: 4
-  use_lora: false
-  lora_rank: 8
-  lora_alpha: 32.0
-  img_size: 1024
-  model_name: cradio_detector
+  catalog: main                    # CATALOG
+  schema: mshtelma                 # SCHEMA
+  backbone_name: cradio_v4_so400m  # BACKBONE — internal literal, NOT the HF id
+  backbone_revision: main          # BACKBONE_REVISION
+  volume_path: /Volumes/main/mshtelma/dentex_raw   # VOLUME_PATH
+  cache_dir: /Volumes/main/mshtelma/model_cache    # CACHE_DIR
+  epochs: 10                       # TRAIN_EPOCHS
+  lr: 0.001                        # TRAIN_LR
+  batch_size: 8                    # TRAIN_BATCH_SIZE
+  num_workers: 4                   # train_detector default; no notebook override
+  use_lora: false                  # TRAIN_USE_LORA
+  lora_rank: 8                     # TRAIN_LORA_RANK
+  lora_alpha: 32.0                 # TRAIN_LORA_ALPHA
+  img_size: 1024                   # train_detector default; no notebook override
+  model_name: cradio_detector      # DETECTOR_MODEL_SHORT (use_lora=false branch)
   register_model: true
   set_candidate_alias: true
 
@@ -53,7 +70,7 @@ command: |-
     REPO_DIR="$(find "$HOME" -maxdepth 2 -name pyproject.toml -printf '%h\n' 2>/dev/null | head -1)"
   fi
   cd "$REPO_DIR"
-  pip install -e .
+  pip install .
   GPUS_PER_NODE=8
   NNODES=$(( WORLD_SIZE / GPUS_PER_NODE ))
   [ "$NNODES" -lt 1 ] && NNODES=1
@@ -63,4 +80,4 @@ command: |-
     --node_rank=$NODE_RANK \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
-    -m src.train.cli
+    -m dais26_dentex.train.cli

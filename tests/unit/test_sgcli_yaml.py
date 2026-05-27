@@ -1,4 +1,5 @@
 """Schema/structural tests for sgcli/*.yaml + cross-file consistency with pyproject.toml."""
+
 from __future__ import annotations
 
 import re
@@ -51,7 +52,7 @@ def test_workload_command_does_not_use_no_deps():
 def test_workload_command_uses_torchrun_module_entrypoint():
     d = _load(WORKLOAD)
     assert "torchrun" in d["command"]
-    assert "-m src.train.cli" in d["command"]
+    assert "-m dais26_dentex.train.cli" in d["command"]
 
 
 def test_workload_parameters_use_internal_backbone_literal():
@@ -59,7 +60,9 @@ def test_workload_parameters_use_internal_backbone_literal():
     train_detector's BackboneName Literal does not accept the HF id."""
     d = _load(WORKLOAD)
     assert d["parameters"]["backbone_name"] in {
-        "cradio_v4_so400m", "dinov3_vitl16", "dinov2_base",
+        "cradio_v4_so400m",
+        "dinov3_vitl16",
+        "dinov2_base",
     }
 
 
@@ -92,10 +95,8 @@ def test_mlflow_pin_matches_pyproject():
     pyproject_text = PYPROJECT.read_text()
     # Both should constrain mlflow to >=2.18 and <3.0 (no major version split).
     for spec in mlflow_specs:
-        assert ">=2.18" in spec or "<3.0" in spec, (
-            f"mlflow pin {spec!r} drifts from pyproject (>=2.18.0,<3.0)"
-        )
-    assert 'mlflow>=2.18.0,<3.0' in pyproject_text
+        assert ">=2.18" in spec or "<3.0" in spec, f"mlflow pin {spec!r} drifts from pyproject (>=2.18.0,<3.0)"
+    assert "mlflow>=2.18.0,<3.0" in pyproject_text
 
 
 def test_requirements_includes_pyyaml():

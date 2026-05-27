@@ -3,23 +3,17 @@
 # MAGIC # 05 — Drift Demo (synthetic shift) / Drift Monitor (scheduled)
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------
 
-dbutils.widgets.dropdown("mode", "demo", ["demo", "scheduled"])
-dbutils.widgets.text("knn_k", "50")
-dbutils.widgets.text("alert_threshold", "2.0")
-dbutils.widgets.text("detector_inference_table", DETECTOR_INFERENCE_TABLE)
-
-mode = dbutils.widgets.get("mode")
-knn_k = int(dbutils.widgets.get("knn_k"))
-alert_threshold = float(dbutils.widgets.get("alert_threshold"))
-detector_inference_table = dbutils.widgets.get("detector_inference_table")
-
-# COMMAND ----------
-
-if mode == "demo":
+if DRIFT_MODE == "demo":
     # Synthetic shift demo: contrast/gamma applied to val images, compare drift scores
     import io
     import numpy as np
@@ -27,10 +21,10 @@ if mode == "demo":
     from PIL import Image
     from pathlib import Path
     import torchvision.transforms.functional as TF
-    from src.drift.embeddings import compute_embeddings
-    from src.drift.monitor import score_drift, bootstrap_drift_ci
-    from src.drift.reference import fit_reference
-    from src.models.backbones import load_backbone
+    from dais26_dentex.drift.embeddings import compute_embeddings
+    from dais26_dentex.drift.monitor import score_drift, bootstrap_drift_ci
+    from dais26_dentex.drift.reference import fit_reference
+    from dais26_dentex.models.backbones import load_backbone
 
     val_dir = Path(VOLUME_PATH) / "images" / "val"
     print(f"Loading {len(list(val_dir.glob('*.png')))} val images")
@@ -59,7 +53,7 @@ if mode == "demo":
     # Reference from train embeddings (read from Delta)
     train_df = spark.table(TRAIN_EMBEDDINGS_TABLE).select("embedding").toPandas()
     ref_arr = np.stack(train_df["embedding"].apply(np.asarray).to_list()).astype(np.float32)
-    ref = fit_reference(ref_arr, method="knn", k=knn_k)
+    ref = fit_reference(ref_arr, method="knn", k=DRIFT_KNN_K)
 
     clean_emb = compute_embeddings(backbone, clean_bytes)
     shifted_emb = compute_embeddings(backbone, shifted_bytes)
@@ -77,7 +71,7 @@ if mode == "demo":
 
 # COMMAND ----------
 
-if mode == "demo":
+if DRIFT_MODE == "demo":
     # Visualization
     import plotly.graph_objects as go
 
@@ -89,10 +83,10 @@ if mode == "demo":
 
 # COMMAND ----------
 
-if mode == "scheduled":
+if DRIFT_MODE == "scheduled":
     import torch
-    from src.drift.monitor import run_drift_monitor
-    from src.models.backbones import load_backbone
+    from dais26_dentex.drift.monitor import run_drift_monitor
+    from dais26_dentex.models.backbones import load_backbone
     backbone, _ = load_backbone(name=BACKBONE, revision=BACKBONE_REVISION,
                                 cache_dir=CACHE_DIR, device="cuda" if torch.cuda.is_available() else "cpu")
     result = run_drift_monitor(
@@ -100,9 +94,9 @@ if mode == "scheduled":
         backbone=backbone,
         catalog=CATALOG,
         schema=SCHEMA,
-        inference_table=detector_inference_table,
-        k=knn_k,
-        alert_threshold=alert_threshold,
+        inference_table=DETECTOR_INFERENCE_TABLE,
+        k=DRIFT_KNN_K,
+        alert_threshold=DRIFT_ALERT_THRESHOLD,
         lookback_hours=1,
     )
     print(result)

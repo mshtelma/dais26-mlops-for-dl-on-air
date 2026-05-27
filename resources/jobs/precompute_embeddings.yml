@@ -14,14 +14,12 @@ resources:
       # NO job_clusters block — AIR-only. Serverless notebook task; the notebook
       # uses serverless GPU compute (single-GPU) for the embedding forward pass.
       #
-      # Shared config (catalog / schema / backbone / backbone_revision) lives in
-      # notebooks/00_config.py and is pulled in via `%run ./00_config`.
+      # All notebook config (catalog / schema / backbone / EMBEDDINGS_BATCH_SIZE)
+      # lives in notebooks/00_config.py and is pulled in via `%run ./00_config`.
 
       tasks:
         - task_key: "precompute"
           notebook_task:
             notebook_path: "../../notebooks/03_precompute_embeddings.py"
-            base_parameters:
-              batch_size: "32"
           libraries:
             - whl: "../../dist/*.whl"

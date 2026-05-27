@@ -4,7 +4,6 @@ import base64
 import io
 import json
 import logging
-import os
 from typing import Any, ClassVar
 
 import mlflow
@@ -13,8 +12,9 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from src.data.transforms import CLIP_MEAN as _CLIP_MEAN_SRC
-from src.data.transforms import CLIP_STD as _CLIP_STD_SRC
+from dais26_dentex.data.transforms import CLIP_MEAN as _CLIP_MEAN_SRC
+from dais26_dentex.data.transforms import CLIP_STD as _CLIP_STD_SRC
+from dais26_dentex.platform.hf_env import configure_hf_env
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +32,12 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
     """
 
     DEFAULT_INPUT_SIZE: int = 224
-    # Source of truth: src/data/transforms.py. Aliased here for backward-compatible attribute access.
+    # Source of truth: src/dais26_dentex/data/transforms.py. Aliased here for backward-compatible attribute access.
     CLIP_MEAN: ClassVar[list[float]] = _CLIP_MEAN_SRC
     CLIP_STD: ClassVar[list[float]] = _CLIP_STD_SRC
 
     def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
-        from src.models.backbones import load_backbone
+        from dais26_dentex.models.backbones import load_backbone
 
         artifacts = context.artifacts
         with open(artifacts["backbone_config"]) as f:
@@ -51,9 +51,7 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
-        if cache_dir is not None:
-            os.environ["HF_HOME"] = cache_dir
-            os.environ["TRANSFORMERS_CACHE"] = cache_dir
+        configure_hf_env(cache_dir)
         self.backbone, self.info = load_backbone(
             name=backbone_config["name"],
             revision=backbone_config.get("revision"),

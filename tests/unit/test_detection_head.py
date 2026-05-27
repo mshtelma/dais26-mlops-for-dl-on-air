@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from src.models.detection_head import (
+from dais26_dentex.models.detection_head import (
     DEFAULT_ANCHOR_SCALES,
     AnchorGenerator,
     DetectionModel,
@@ -77,7 +77,8 @@ def test_calibrate_anchors(tmp_path: Path):
         "annotations": [
             {"id": i, "image_id": 1, "bbox": [0, 0, 20, 20], "category_id": 0, "area": 400, "iscrowd": 0}
             for i in range(5)
-        ] + [
+        ]
+        + [
             {"id": 5 + i, "image_id": 1, "bbox": [0, 0, 100, 100], "category_id": 1, "area": 10000, "iscrowd": 0}
             for i in range(5)
         ],
@@ -116,8 +117,9 @@ def test_calibrate_aspect_ratios(tmp_path: Path):
 
 def test_detection_model_inference():
     """End-to-end forward with a fake backbone returning (summary, spatial)."""
+
     class FakeBackbone(nn.Module):
-        def __init__(self, spatial_dim: int = 1536):
+        def __init__(self, spatial_dim: int = 1152):
             super().__init__()
             self.spatial_dim = spatial_dim
 
@@ -126,14 +128,14 @@ def test_detection_model_inference():
             ph = h // 16
             pw = w // 16
             return (
-                torch.randn(b, 1152),                  # summary
+                torch.randn(b, 1152),  # summary
                 torch.randn(b, ph * pw, self.spatial_dim),  # spatial
             )
 
-    bb = FakeBackbone(spatial_dim=1536)
+    bb = FakeBackbone(spatial_dim=1152)
     model = DetectionModel(
         backbone=bb,
-        spatial_dim=1536,
+        spatial_dim=1152,
         num_classes=4,
         scales=[16, 32, 64, 128],
         aspect_ratios=[0.5, 1.0, 2.0],
@@ -160,9 +162,9 @@ def test_detection_model_forward_train():
             b, _, h, w = x.shape
             ph = h // 16
             pw = w // 16
-            return (torch.randn(b, 1152), torch.randn(b, ph * pw, 1536))
+            return (torch.randn(b, 1152), torch.randn(b, ph * pw, 1152))
 
-    model = DetectionModel(backbone=FakeBackbone(), spatial_dim=1536)
+    model = DetectionModel(backbone=FakeBackbone(), spatial_dim=1152)
     model.eval()
     images = torch.randn(1, 3, 256, 256)
     with torch.no_grad():

@@ -1,6 +1,16 @@
 version: "4"
+
+# Pre-install of non-base-env deps for the detector training workload.
+# Authoritative source for project deps is `pyproject.toml` — `pip install .`
+# inside the workload command (see workload_train_detector.yaml) installs the
+# `dais26_dentex` wheel which re-confirms these. Listing them here is a speed
+# optimization (parallel install before snapshot wheel build); keep in sync
+# with the non-base-env subset of pyproject [project] dependencies.
+#
+# Base env v4 (https://docs.databricks.com/aws/en/release-notes/serverless/environment-version)
+# already supplies torch, torchvision, transformers, mlflow, numpy, pandas,
+# scipy, scikit-learn, Pillow, PyYAML, huggingface-hub, tqdm, requests.
 dependencies:
-  - albumentations>=1.4.0,<2.0
   - pycocotools>=2.0.8
   - peft>=0.14.0,<1.0
   - umap-learn>=0.5.6,<1.0
@@ -10,3 +20,11 @@ dependencies:
   - huggingface-hub>=0.26.0,<1.0
   - PyYAML>=6.0,<7.0
   - "mlflow>=2.18.0,<3.0"
+  # HF trust_remote_code transitive deps for nvidia/C-RADIOv4-SO400M backbone.
+  # NOT imported directly by our code — required by the model repo's custom
+  # modeling_*.py loaded at AutoModel.from_pretrained(..., trust_remote_code=True).
+  # See pyproject.toml and src/dais26_dentex/models/backbones.py guard.
+  # PyPI dist name `open_clip_torch` maps to import name `open_clip`.
+  - timm>=1.0.0,<2.0
+  - einops>=0.8.0,<1.0
+  - open_clip_torch>=2.30.0,<3.0

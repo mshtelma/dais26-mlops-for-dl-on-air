@@ -1,4 +1,4 @@
-"""Unit tests for src/data/dataset.py using the dentex_mini fixture."""
+"""Unit tests for src/dais26_dentex/data/dataset.py using the dentex_mini fixture."""
 
 from __future__ import annotations
 
@@ -13,14 +13,14 @@ FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "dentex_mini"
 
 @pytest.fixture(scope="module")
 def train_dataset():
-    from src.data.dataset import DENTEXDetectionDataset
+    from dais26_dentex.data.dataset import DENTEXDetectionDataset
 
     return DENTEXDetectionDataset(str(FIXTURE_DIR), split="train")
 
 
 @pytest.fixture(scope="module")
 def val_dataset():
-    from src.data.dataset import DENTEXDetectionDataset
+    from dais26_dentex.data.dataset import DENTEXDetectionDataset
 
     return DENTEXDetectionDataset(str(FIXTURE_DIR), split="val")
 
@@ -28,6 +28,7 @@ def val_dataset():
 # ---------------------------------------------------------------------------
 # __len__
 # ---------------------------------------------------------------------------
+
 
 def test_train_len(train_dataset):
     assert len(train_dataset) == 2
@@ -40,6 +41,7 @@ def test_val_len(val_dataset):
 # ---------------------------------------------------------------------------
 # __getitem__ structure
 # ---------------------------------------------------------------------------
+
 
 def test_getitem_returns_tuple(train_dataset):
     item = train_dataset[0]
@@ -90,6 +92,7 @@ def test_getitem_image_id_tensor(train_dataset):
 # Second item (img_0002 - 1 annotation)
 # ---------------------------------------------------------------------------
 
+
 def test_getitem_second_item_boxes(train_dataset):
     _, target = train_dataset[1]
     assert target["boxes"].shape == (1, 4)
@@ -99,8 +102,9 @@ def test_getitem_second_item_boxes(train_dataset):
 # detection_collate
 # ---------------------------------------------------------------------------
 
+
 def test_detection_collate():
-    from src.data.dataset import detection_collate
+    from dais26_dentex.data.dataset import detection_collate
 
     img1 = torch.zeros(3, 16, 16)
     img2 = torch.zeros(3, 16, 16)

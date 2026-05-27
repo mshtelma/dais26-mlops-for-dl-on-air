@@ -77,14 +77,13 @@ summary, spatial_features = backbone(images)
 | Output | Shape | Dim | Used by |
 |--------|-------|-----|---------|
 | `summary` | `(B, 1152)` | 1152 | Embeddings, drift, Vector Search, EmbedderPyfunc |
-| `spatial_features` | `(B, T, 1536)` | 1536 | FPN adapter, RetinaNet head, DetectorPyfunc |
+| `spatial_features` | `(B, T, 1152)` | 1152 | FPN adapter, RetinaNet head, DetectorPyfunc |
 
 Where `T = (H / patch_size) * (W / patch_size)`. For 1024×1024 input with `patch_size=16`: `T = 64*64 = 4096`.
 
 **Critical facts:**
-- `summary` dim (1152) and `spatial_features` dim (1536) are **different**. Never interchange them.
-- `summary` is a separately pooled global feature — it is **not** a CLS token from the patch sequence.
-- FPN `in_channels` must be **1536** (spatial dim).
+- `summary` and `spatial_features` are **distinct outputs** — never interchange them. They share the SO400M ViT hidden dim (1152) but `summary` is a separately pooled global feature, not a CLS token from the patch sequence.
+- FPN `in_channels` must be **1152** (spatial dim).
 - Vector Search index `embedding_dimension` must be **1152** (summary dim).
 - Drift KNN reference must be built from **1152**-dim vectors.
 
@@ -94,7 +93,7 @@ Where `T = (H / patch_size) * (W / patch_size)`. For 1024×1024 input with `patc
 @dataclass
 class BackboneInfo:
     summary_dim: int        # C-RADIOv4: 1152  |  DINOv2-base: 768
-    spatial_dim: int        # C-RADIOv4: 1536  |  DINOv2-base: 768
+    spatial_dim: int        # C-RADIOv4-SO400M: 1152  |  DINOv2-base: 768
     spatial_scale: int      # patch stride (16 for both)
     has_separate_summary: bool  # True for C-RADIOv4; False for DINOv2 (CLS token)
     patch_size: int
@@ -103,18 +102,20 @@ class BackboneInfo:
 ```
 
 All dimension-dependent code parameterizes on `backbone_info.summary_dim` and
-`backbone_info.spatial_dim`. Hardcoding 1152 or 1536 anywhere outside of `backbones.py` is a bug.
+`backbone_info.spatial_dim`. Hardcoding 1152 or 768 anywhere outside of `backbones.py` is a bug.
 
 ### Cascade through codebase
 
 | Module | Uses |
 |--------|------|
-| `src/models/backbones.py` | Defines BackboneInfo; returns `(summary, spatial_features)` |
-| `src/models/adapters.py` | `FPNAdapter(in_channels=backbone_info.spatial_dim)` → 1536 |
-| `src/serve/detector_pyfunc.py` | Uses `spatial_features` for detection |
-| `src/serve/embedder_pyfunc.py` | Uses `summary`; output dim = `backbone_info.summary_dim` |
-| `src/train/precompute_embeddings.py` | Writes `ARRAY<FLOAT>` of length `backbone_info.summary_dim` |
-| `src/drift/embeddings.py` | Extracts `summary`, L2-normalizes |
+| `src/dais26_dentex/models/backbones.py` | Defines BackboneInfo; returns `(summary, spatial_features)` |
+| `src/dais26_dentex/models/adapters.py` | `FPNAdapter(in_channels=backbone_info.spatial_dim)` → 1152 |
+| `src/dais26_dentex/models/builder.py` | `build_detector(...)` — wraps backbone load in `rank0_first` to dodge the cold-cache HF race |
+| `src/dais26_dentex/models/targets.py` | Anchor + target encoding; `FPNLevel` enum from `config/constants.py` |
+| `src/dais26_dentex/serve/detector_pyfunc.py` | Uses `spatial_features` for detection (NMS + decode in `serve/postprocess.py`) |
+| `src/dais26_dentex/serve/embedder_pyfunc.py` | Uses `summary`; output dim = `backbone_info.summary_dim` |
+| `src/dais26_dentex/drift/embeddings.py` | Extracts `summary`, L2-normalizes |
+| `notebooks/03_precompute_embeddings.py` | Writes `ARRAY<FLOAT>` of length `backbone_info.summary_dim` |
 | Vector Search index | `embedding_dimension = backbone_info.summary_dim` |
 | Drift reference | Built from `backbone_info.summary_dim`-dim vectors |
 
@@ -156,30 +157,37 @@ Does **not** deploy:
 ### Phase 2: `databricks bundle run train_detector -t dev`
 
 ```
-1. setup         (notebooks/00_setup.py)
+1. setup         (notebooks/00_setup.py, serverless notebook task)
    UC bootstrap: CREATE IF NOT EXISTS for all tables and volumes.
    UC grants for service principal. train_embeddings table with CDF enabled.
    |
    v
-2. train         (notebooks/02_train_detector_air.py)
-   Train FPN + RetinaNet head on DENTEX (10 epochs, frozen backbone).
-   Log to MLflow with signature + input_example.
+2. train         (notebooks/02_train_detector_air.py, serverless notebook task)
+   Notebook calls serverless_gpu.@distributed → H100 pool.
+   Inside the worker: configure_hf_env(...) → train_detector(...) →
+     Trainer.run(): build_detector (rank0_first), DDP wrap (find_unused_parameters=True),
+     _epoch_loop, _validate, _save_and_register (rank-0 only):
+       MlflowReporter.log_pyfunc(pip_requirements=serving_pip_requirements())
+       MlflowReporter.set_candidate_alias(@candidate)
+   Returns run_id on rank 0; None on other ranks.
    |
    v
-3. register_and_alias  (notebooks/04_deploy_serving.py, action=register_and_set_candidate)
-   Register model version N in UC.
-   Set @candidate alias on version N.
-   |
-   v
-4. deploy_endpoint     (notebooks/04_deploy_serving.py, action=deploy_and_smoke_test)
-   Resolve @candidate -> numeric version N via MlflowClient.get_model_version_by_alias()
-   Create/update endpoint with numeric version N (never an alias string)
-   ai_gateway is a top-level sibling of config (NOT nested under config)
-   Wait for READY state (600s timeout, 15s poll)
-   Smoke test: 1 image -> 200 OK with detections
-   On SUCCESS: promote @candidate -> @champion
-   On FAILURE: leave @candidate, do NOT touch @champion
+3. deploy_endpoint     (notebooks/04_deploy_serving.py, switches on DEPLOY_ACTION)
+   action=register_and_set_candidate: verify @candidate exists, exit
+   action=deploy_and_smoke_test:
+     dais26_dentex.serve.endpoint_manager.deploy_and_smoke_test(...)
+       Resolve @candidate -> numeric version N via MlflowClient.get_model_version_by_alias()
+       Create/update endpoint with numeric version N (never an alias string)
+       ai_gateway is a top-level sibling of config (NOT nested under config)
+       Wait for READY state (900s timeout, 15s poll)
+       Smoke test: 1 image -> 200 OK with detections
+       On SUCCESS: promote @candidate -> @champion (capture previous_champion for rollback)
+       On FAILURE: leave @candidate, do NOT touch @champion
 ```
+
+The training core (`Trainer`) is identical across launch paths — `notebook @distributed`
+or `sgcli` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
+or `--config`, builds the `TrainerConfig`, and dispatches to the same `Trainer.run()`.
 
 ### Phase 3: `databricks bundle run precompute_embeddings -t dev`
 
@@ -322,11 +330,11 @@ Input image (B, 3, 1024, 1024)
     │
     ▼ C-RADIOv4-SO400M (frozen, 412M params)
     ├── summary         (B, 1152)  → used by EmbedderPyfunc, drift, VS
-    └── spatial_features (B, 4096, 1536)  → used by FPN below
+    └── spatial_features (B, 4096, 1152)  → used by FPN below
         │
-        ▼ FPNAdapter (in_channels=1536, out_channels=256) — ~2.4M params
-        │  1. Reshape tokens to (B, 1536, 64, 64) spatial grid
-        │  2. 1×1 conv: 1536 → 256
+        ▼ FPNAdapter (in_channels=1152, out_channels=256) — ~2.4M params
+        │  1. Reshape tokens to (B, 1152, 64, 64) spatial grid
+        │  2. 1×1 conv: 1152 → 256
         │  3. Bilinear 2× upsample → P3 (B, 256, 128, 128)
         │  4. Identity → P4 (B, 256, 64, 64)
         │  5. Stride-2 conv → P5 (B, 256, 32, 32)
@@ -406,24 +414,52 @@ the only path supported by this repo.
 ## Code module dependency graph
 
 ```
-src/
+src/dais26_dentex/
+├── config/
+│   ├── constants.py          (ARTIFACT_FORMAT_VERSION=2, MANIFEST_FILE,
+│   │                          ALIAS_CANDIDATE/CHAMPION, FPNLevel StrEnum,
+│   │                          HF env var name constants)
+│   ├── manifest.py           (Manifest v2 dataclass: BackboneSpec + DetectorSpec
+│   │                          → single manifest.json, version-first key order)
+│   └── trainer_config.py     (TrainerConfig frozen dataclass; from_yaml/from_dict
+│                              feeds notebook @distributed AND sgcli/torchrun)
+│
 ├── data/
-│   ├── dentex_loader.py      (huggingface_hub → UC Volume)
+│   ├── dataset.py            (PyTorch Dataset over COCO JSON + UC Volume images)
+│   ├── dentex_loader.py      (huggingface_hub → UC Volume; module-level
+│   │                          `setdefault` for HF transfer/xet env vars)
 │   └── transforms.py         (Albumentations, C-RADIOv4 normalization stats)
 │
-├── models/
-│   ├── backbones.py          (BackboneInfo dataclass — single source of truth)
-│   │     ↑ consumed by everything below
-│   ├── adapters.py           (FPNAdapter; in_channels=backbone_info.spatial_dim)
-│   ├── detection_head.py     (RetinaNetHead; input from FPNAdapter)
-│   └── peft.py               (STRETCH: LoRA on backbone QKV+proj)
-│
-├── train/
-│   ├── train_detector.py     (uses backbones + adapters + detection_head + eval)
-│   └── precompute_embeddings.py (uses backbones; writes summary to Delta)
+├── distributed/
+│   ├── primitives.py         (setup_distributed, safe_barrier, seed_per_rank,
+│   │                          world_size, is_rank0, unwrap_model;
+│   │                          BarrierTimeoutError surfaces dead-rank deadlocks)
+│   └── barrier_dance.py      (rank0_first contextmanager — sequence-matched
+│                              NCCL barriers; used by models/builder.py)
 │
 ├── eval/
 │   └── coco_metrics.py       (pycocotools wrapper)
+│
+├── models/
+│   ├── backbones.py          (BackboneInfo dataclass — single source of truth;
+│   │                          C-RADIOv4 trust_remote_code dep guard)
+│   │     ↑ consumed by everything below
+│   ├── adapters.py           (FPNAdapter; in_channels=backbone_info.spatial_dim)
+│   ├── builder.py            (build_detector wrapped in rank0_first)
+│   ├── detection_head.py     (RetinaNetHead; input from FPNAdapter)
+│   ├── targets.py            (anchor generator + target encoding; FPNLevel)
+│   └── peft.py               (STRETCH: LoRA on backbone QKV+proj)
+│
+├── platform/
+│   ├── hf_env.py             (configure_hf_env: HF_HOME, TRANSFORMERS_CACHE,
+│   │                          HF_HUB_ENABLE_HF_TRANSFER=0, HF_HUB_DISABLE_XET=1
+│   │                          — must be called BEFORE any HF import)
+│   ├── mlflow_io.py          (MlflowReporter; serving_pip_requirements reads
+│   │                          [tool.dais26.serving-deps] from pyproject.toml
+│   │                          shipped inside the wheel; AliasingError;
+│   │                          _log_model_artifact_kwarg picks name=/artifact_path=)
+│   └── uc.py                 (UCName fqn, VolumePath child(); regex-validated
+│                              identifiers — no inline f"{cat}.{sch}.{name}")
 │
 ├── drift/
 │   ├── embeddings.py         (uses backbones; extracts summary, L2-normalize)
@@ -431,11 +467,38 @@ src/
 │   ├── monitor.py            (orchestrates: reader → embeddings → reference → scores)
 │   └── inference_table_reader.py (parses AI Gateway STRING request column)
 │
-└── serve/
-    ├── detector_pyfunc.py    (uses backbones + adapters + detection_head)
-    ├── embedder_pyfunc.py    (uses backbones; returns summary dim=backbone_info.summary_dim)
-    └── endpoint_manager.py   (SDK: create_and_wait, update_config_and_wait, smoke_test, promote)
+├── serve/
+│   ├── detector_pyfunc.py    (uses backbones + adapters + detection_head;
+│   │                          loads Manifest v2; raises IncompatibleArtifactError
+│   │                          on v1 artifacts)
+│   ├── embedder_pyfunc.py    (uses backbones; returns summary dim=backbone_info.summary_dim)
+│   ├── postprocess.py        (NMS + decode + label remap — split out of pyfunc
+│   │                          for unit-testability)
+│   └── endpoint_manager.py   (SDK: create_and_wait, update_config_and_wait, smoke_test, promote)
+│
+└── train/
+    ├── trainer.py            (Trainer class — owns DDP wrap, _epoch_loop,
+    │                          _validate, _save_and_register; rank-0-only
+    │                          MlflowReporter + UC registration)
+    ├── train_detector.py     (thin shim: builds TrainerConfig, calls Trainer(cfg).run())
+    ├── losses.py             (focal + smooth-L1)
+    └── cli.py                (sgcli/torchrun entrypoint — reads
+                               $HYPERPARAMETERS_PATH or --config; prints
+                               MODEL_URI=<run_id> on rank 0)
 ```
+
+### Cross-cutting hardening anchors
+
+| Anchor | Module | Why |
+|---|---|---|
+| Manifest v2 | `config/manifest.py` | One `manifest.json` (version first → `head -1` triages a model) replaces v1's three sidecar JSONs. `load_manifest` raises `IncompatibleArtifactError` on v1 with a one-shot migration hint. |
+| TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and sgcli's torchrun. |
+| `safe_barrier` | `distributed/primitives.py` | Bounded `wait()` over `dist.barrier(async_op=True)` — surfaces `BarrierTimeoutError` instead of hanging on NCCL when a peer rank crashed. |
+| `rank0_first` | `distributed/barrier_dance.py` | Non-rank-0 hits its barrier first, rank 0 does the work and then hits its barrier; trailing symmetric barrier. Pattern fixes the cold-cache HF download race. |
+| `configure_hf_env` | `platform/hf_env.py` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` — UC Volume FUSE rejects parallel chunked writes. |
+| `serving_pip_requirements` | `platform/mlflow_io.py` ↔ `pyproject.toml::[tool.dais26.serving-deps]` | One edit to add a runtime dep. The wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` (hatchling `force-include`) so `importlib.resources` resolves it inside AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. |
+| `_log_model_artifact_kwarg` | `platform/mlflow_io.py` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature` — replaces the per-call `try/except TypeError`. |
+| `UCName` / `VolumePath` | `platform/uc.py` | Regex-validated identifiers; replaces inline `f"{catalog}.{schema}.{name}"` so dotted-catalog typos fail fast. |
 
 ---
 

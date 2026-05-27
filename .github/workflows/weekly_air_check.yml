@@ -98,6 +98,6 @@ jobs:
           else:
               raise RuntimeError(f'Unexpected output: {type(out)}')
           assert summary.shape == (1, 1152), f'summary shape: {summary.shape}'
-          assert spatial.shape[-1] == 1536, f'spatial dim: {spatial.shape[-1]}'
+          assert spatial.shape[-1] == 1152, f'spatial dim: {spatial.shape[-1]}'
           print(f'C-RADIOv4 SHA {sha} loads correctly. summary={summary.shape}, spatial={spatial.shape}')
           "

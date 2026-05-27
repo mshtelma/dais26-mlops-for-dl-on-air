@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.eval.coco_metrics import evaluate_coco, format_predictions_for_coco
+from dais26_dentex.eval.coco_metrics import evaluate_coco, format_predictions_for_coco
 
 
 @pytest.fixture()

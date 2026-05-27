@@ -37,8 +37,9 @@ def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     log = logging.getLogger("pin_cache")
 
-    os.environ["HF_HOME"] = args.cache_dir
-    os.environ["TRANSFORMERS_CACHE"] = args.cache_dir
+    from dais26_dentex.platform.hf_env import configure_hf_env
+
+    configure_hf_env(args.cache_dir)
     os.makedirs(args.cache_dir, exist_ok=True)
 
     log.info("Caching C-RADIOv4-SO400M (revision=%s)", args.cradio_revision)
@@ -73,7 +74,7 @@ def main() -> int:
             log.error("--volume-path required for --bake-dinov2-fallback")
             return 1
         log.info("Baking DINOv2 fallback head checkpoint (1 epoch) ...")
-        from src.train.train_detector import train_detector
+        from dais26_dentex.train.train_detector import train_detector
 
         train_detector(
             catalog=args.catalog,

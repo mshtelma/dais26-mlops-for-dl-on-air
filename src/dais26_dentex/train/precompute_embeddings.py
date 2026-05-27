@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def _load_image_tensor(path: str, size: int = 224) -> torch.Tensor:
     """Load image, resize, normalize with CLIP stats, return (3, size, size) tensor."""
-    from src.data.transforms import CLIP_MEAN, CLIP_STD
+    from dais26_dentex.data.transforms import CLIP_MEAN, CLIP_STD
 
     img = Image.open(path).convert("RGB").resize((size, size))
     arr = np.array(img, dtype=np.float32) / 255.0
@@ -57,27 +56,32 @@ def precompute_embeddings(
     from pyspark.sql import Row
     from pyspark.sql.types import ArrayType, FloatType, StringType, StructField, StructType
 
-    from src.data.dentex_loader import get_label_map
-    from src.models.backbones import load_backbone
+    from dais26_dentex.data.dentex_loader import get_label_map, load_canonical_split
+    from dais26_dentex.models.backbones import load_backbone
 
     splits = splits or ["train", "val", "test"]
     label_map = get_label_map()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     backbone, info = load_backbone(
-        name=backbone_name, revision=backbone_revision, cache_dir=cache_dir, device=device,
+        name=backbone_name,
+        revision=backbone_revision,
+        cache_dir=cache_dir,
+        device=device,
     )
     backbone.eval()
     embedding_dim = info.summary_dim
     logger.info("Backbone %s loaded; summary_dim=%d", info.model_name, embedding_dim)
 
     # Schema (ARRAY<FLOAT> required for Vector Search)
-    schema_struct = StructType([
-        StructField("image_id", StringType(), nullable=False),
-        StructField("embedding", ArrayType(FloatType()), nullable=False),
-        StructField("diagnosis", StringType(), nullable=True),
-        StructField("split", StringType(), nullable=False),
-        StructField("image_path", StringType(), nullable=False),
-    ])
+    schema_struct = StructType(
+        [
+            StructField("image_id", StringType(), nullable=False),
+            StructField("embedding", ArrayType(FloatType()), nullable=False),
+            StructField("diagnosis", StringType(), nullable=True),
+            StructField("split", StringType(), nullable=False),
+            StructField("image_path", StringType(), nullable=False),
+        ]
+    )
 
     full_table = f"{catalog}.{schema}.{table_name}"
 
@@ -101,8 +105,7 @@ def precompute_embeddings(
         if not ann_path.exists():
             logger.warning("Annotation file missing: %s", ann_path)
             continue
-        with open(ann_path) as f:
-            coco = json.load(f)
+        coco = load_canonical_split(volume_path, split)
         img_by_id = {img["id"]: img for img in coco.get("images", [])}
         anns_by_img: dict[int, list] = {}
         for ann in coco.get("annotations", []):
@@ -122,7 +125,7 @@ def precompute_embeddings(
         # Batched forward
         all_embeddings: list[np.ndarray] = []
         for start in range(0, len(paths), batch_size):
-            batch_paths = paths[start:start + batch_size]
+            batch_paths = paths[start : start + batch_size]
             tensors = torch.stack([_load_image_tensor(p, image_size) for p in batch_paths]).to(device)
             with torch.no_grad():
                 summary, _ = backbone(tensors)
@@ -154,6 +157,7 @@ def precompute_embeddings(
     if vector_search_endpoint is not None and vector_search_index is not None:
         try:
             from databricks.sdk import WorkspaceClient
+
             w = WorkspaceClient()
             w.vector_search_indexes.sync_index(index_name=vector_search_index)
             logger.info("Triggered VS index sync: %s", vector_search_index)

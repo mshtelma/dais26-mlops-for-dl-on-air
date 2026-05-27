@@ -17,17 +17,14 @@ resources:
 
       # NO job_clusters block — AIR-only. Serverless notebook task.
       #
-      # Shared config (catalog / schema / backbone / backbone_revision) lives in
-      # notebooks/00_config.py and is pulled in via `%run ./00_config`. The
-      # `detector_inference_table` default is also in 00_config.
+      # All notebook config (catalog / schema / backbone / DRIFT_MODE / knn_k /
+      # alert_threshold / detector_inference_table) lives in notebooks/00_config.py
+      # and is pulled in via `%run ./00_config`. To use this as a scheduled monitor,
+      # set DRIFT_MODE = "scheduled" in 00_config.py.
 
       tasks:
         - task_key: "compute_drift"
           notebook_task:
             notebook_path: "../../notebooks/05_drift_demo.py"
-            base_parameters:
-              mode: "scheduled"
-              knn_k: "50"
-              alert_threshold: "2.0"
           libraries:
             - whl: "../../dist/*.whl"

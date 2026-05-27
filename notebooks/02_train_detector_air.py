@@ -10,8 +10,8 @@
 # MAGIC promotion happens after smoke test in the `deploy_endpoint` task).
 
 # COMMAND ----------
-# MAGIC %pip install --quiet serverless_gpu pyyaml
-# MAGIC %pip install --quiet /Workspace/Users/$(whoami)/dais26/dist/*.whl
+# MAGIC %pip install --quiet ..
+
 # COMMAND ----------
 dbutils.library.restartPython()
 
@@ -19,43 +19,31 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
-dbutils.widgets.text("epochs", "10")
-dbutils.widgets.text("lr", "1e-3")
-dbutils.widgets.text("batch_size", "8")
-dbutils.widgets.dropdown("use_lora", "false", ["true", "false"])
-dbutils.widgets.text("lora_rank", "8")
-dbutils.widgets.text("lora_alpha", "32")
-dbutils.widgets.text("gpus", "8")
-dbutils.widgets.dropdown("gpu_type", "h100", ["h100", "a10"])
-
-# COMMAND ----------
-# Resolve driver-side values. dbutils / spark are NOT available inside the
-# @distributed-wrapped function — anything that depends on them must be
-# captured into a closure variable here. The shared config constants
-# (CATALOG, SCHEMA, BACKBONE, BACKBONE_REVISION, VOLUME_PATH, CACHE_DIR,
-# EXPERIMENT_NAME) come from `%run ./00_config` above; they are
-# module-level constants and capture cleanly into the closure.
-epochs = int(dbutils.widgets.get("epochs"))
-lr = float(dbutils.widgets.get("lr"))
-batch_size = int(dbutils.widgets.get("batch_size"))
-use_lora = dbutils.widgets.get("use_lora") == "true"
-lora_rank = int(dbutils.widgets.get("lora_rank"))
-lora_alpha = float(dbutils.widgets.get("lora_alpha"))
-gpus = int(dbutils.widgets.get("gpus"))
-gpu_type = dbutils.widgets.get("gpu_type")
-
-model_name = DETECTOR_LORA_MODEL_SHORT if use_lora else DETECTOR_MODEL_SHORT
+# Hyperparameters come from notebooks/00_config.py (TRAIN_* constants).
+# Module-level constants pulled in via `%run ./00_config` capture cleanly into
+# the @distributed closure, so dbutils / spark are NOT needed on workers.
+model_name = DETECTOR_LORA_MODEL_SHORT if TRAIN_USE_LORA else DETECTOR_MODEL_SHORT
 
 # COMMAND ----------
 from serverless_gpu import distributed
 
-from src.train.train_detector import train_detector
 
-
-@distributed(gpus=gpus, gpu_type=gpu_type)
+@distributed(gpus=TRAIN_GPUS, gpu_type=TRAIN_GPU_TYPE)
 def run_train():
-    # IMPORTANT: this function body runs in the serverless GPU pool, not on the driver.
-    # No spark / dbutils / driver-side imports allowed here.
+    # Body runs in the serverless GPU pool, not on the driver — no spark / dbutils.
+    # HF env must be set BEFORE any HF import on this worker (constants-module
+    # import locks the values). The `train_detector` import below is intentionally
+    # deferred for the same reason. See docs/RUNBOOK.md#hf-transfer-fuse-incompat.
+    import os
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "600"
+    # MLflow auto-resolves the experiment from MLFLOW_EXPERIMENT_NAME if no
+    # explicit set_experiment call has run yet. Set inside the worker because
+    # AIR workers don't inherit the driver's process env.
+    os.environ["MLFLOW_EXPERIMENT_NAME"] = EXPERIMENT_NAME
+
+    from dais26_dentex.train.train_detector import train_detector
+
     return train_detector(
         catalog=CATALOG,
         schema=SCHEMA,
@@ -63,18 +51,26 @@ def run_train():
         backbone_revision=BACKBONE_REVISION,
         volume_path=VOLUME_PATH,
         cache_dir=CACHE_DIR,
-        epochs=epochs,
-        lr=lr,
-        batch_size=batch_size,
-        use_lora=use_lora,
-        lora_rank=lora_rank,
-        lora_alpha=lora_alpha,
+        epochs=TRAIN_EPOCHS,
+        lr=TRAIN_LR,
+        batch_size=TRAIN_BATCH_SIZE,
+        use_lora=TRAIN_USE_LORA,
+        lora_rank=TRAIN_LORA_RANK,
+        lora_alpha=TRAIN_LORA_ALPHA,
         model_name=model_name,
         experiment_name=EXPERIMENT_NAME,
         register_model=True,
         set_candidate_alias=True,
     )
 
+
+# Set MLFLOW_EXPERIMENT_NAME on the driver BEFORE .distributed() — both for any
+# driver-side mlflow ops (today there are none, but cheap insurance) and so the
+# value is in place at closure-capture time. The same line is repeated inside
+# run_train() because AIR workers run in fresh processes that don't inherit
+# driver env.
+import os
+os.environ["MLFLOW_EXPERIMENT_NAME"] = EXPERIMENT_NAME
 
 results = run_train.distributed()        # returns list of per-rank return values
 # Only rank 0 returns the run_id; other ranks return None.

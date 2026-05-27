@@ -61,9 +61,10 @@ Only the 5-million-parameter detection head learns."
 
 - **Slide 5:** BackboneInfo contract diagram.
   - `summary` → shape `(B, 1152)` — global image feature. Used for embeddings, drift, VS.
-  - `spatial_features` → shape `(B, T, 1536)` — patch features. Used for detection FPN.
-  - "These are different dimensions. 1152 is not 1536. Everything downstream parameterizes on
-    `backbone_info.summary_dim` or `backbone_info.spatial_dim` — never hardcoded."
+  - `spatial_features` → shape `(B, T, 1152)` — patch features. Used for detection FPN.
+  - "Same hidden dim (1152), but two distinct outputs — `summary` is pooled, `spatial_features` is
+    per-patch. Everything downstream parameterizes on `backbone_info.summary_dim` or
+    `backbone_info.spatial_dim` — never hardcoded."
 
 - **Slide 6:** The three-jobs architecture diagram (matches ARCHITECTURE.md system overview).
   One UC Volume. Three consumers. One frozen backbone artifact.
@@ -83,13 +84,17 @@ Budget 7 minutes. Run 1-2 epochs live; show pre-baked epochs 3-10.
 
 **Notebook:** `notebooks/02_train_detector_air.py`
 
-1. Show the widget parameters: `backbone=nvidia/C-RADIOv4-SO400M`, `epochs=2` (live), then
-   load pre-baked run for epochs 3-10.
+1. Open `notebooks/00_config.py` first to call out the params: `BACKBONE_NAME=nvidia/C-RADIOv4-SO400M`,
+   `TRAIN_EPOCHS=2` (live override for the demo), then we'll load a pre-baked run for epochs 3-10.
+   "No widgets, no DAB `base_parameters` — one config file is the only place params live."
 2. Start training. MLflow autolog shows loss per batch.
 3. Talk over the training loop while epochs run:
    - "The backbone is frozen. We're only updating the FPN adapter and RetinaNet head."
-   - "FPN takes `spatial_features` (dim 1536), produces 4 feature maps: P3-P6."
+   - "FPN takes `spatial_features` (dim 1152), produces 4 feature maps: P3-P6."
    - "RetinaNet applies focal loss — designed for class imbalance."
+   - "There's one training core — `Trainer` in `src/dais26_dentex/train/trainer.py`. The notebook
+     dispatches it via `serverless_gpu.@distributed`; sgcli runs the same core via `torchrun`.
+     Same `TrainerConfig` dataclass feeds both surfaces."
 4. After 2 epochs: switch to the pre-baked MLflow run (epochs 3-10 pre-logged).
 5. Show the val/mAP@50 curve. Target: ≥ 0.45 after 10 epochs.
 6. Show the MLflow model registration: `ml.dais26_vfm.cradio_detector`, `@champion` alias.
@@ -131,7 +136,7 @@ Demonstrate Vector Search top-10 and a UMAP of the embedding space.
 6. "Same backbone as the detector. Different output tensor. Different downstream artifact.
    `summary` for semantic similarity; `spatial_features` for pixel-level detection."
 
-**Key slide (Slide 12):** BackboneInfo contract revisited. `summary` 1152 ≠ `spatial_features` 1536.
+**Key slide (Slide 12):** BackboneInfo contract revisited. `summary` (1152, pooled) and `spatial_features` (1152, per-patch) — same hidden dim, distinct outputs.
 
 **Backup:** Switch to `seg3_similarity.mp4`.
 
@@ -220,7 +225,7 @@ Introduce the Mosaic AI vs. alternatives comparison.
   "One backbone artifact. One UC Volume. Three roles:"
   | Role | Backbone output | Artifact |
   |------|----------------|---------|
-  | Detection head | `spatial_features` dim=1536 | Mosaic AI serving endpoint |
+  | Detection head | `spatial_features` dim=1152 | Mosaic AI serving endpoint |
   | Embedding service | `summary` dim=1152 | VS index + Delta table |
   | Drift sensor | `summary` dim=1152 | `drift_scores` Delta table |
 
@@ -262,7 +267,7 @@ Common expected questions and suggested answers:
 | Slide | Content | Why critical |
 |-------|---------|-------------|
 | Slide 4 | License | DENTEX is CC-BY-NC-SA. Must be stated explicitly. |
-| Slide 5 | BackboneInfo contract | summary=1152, spatial=1536. Wrong dim → wrong artifacts. |
+| Slide 5 | BackboneInfo contract | summary=1152 (pooled), spatial=1152 (per-patch). Wrong tensor → wrong artifacts. |
 | Slide 10 | Two-phase deploy | Explains why endpoints are SDK-driven, not YAML. |
 | Slide 16 | Latency table | Actual benchmark numbers from Phase 4. |
 | Slide 21 | What to take home | Reproducibility message + repo link. |

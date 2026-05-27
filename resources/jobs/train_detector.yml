@@ -15,16 +15,15 @@ resources:
       # Databricks resolves compute automatically. The train notebook's @distributed
       # decorator dispatches GPU work to the H100 serverless GPU pool.
       #
-      # Shared config (catalog / schema / backbone / backbone_revision) lives in
-      # notebooks/00_config.py and is pulled in via `%run ./00_config` — no
-      # base_parameters for those keys.
+      # All notebook config (catalog / schema / backbone / hyperparameters /
+      # endpoint / workload sizing) lives in notebooks/00_config.py and is
+      # pulled in via `%run ./00_config`. No widget-style base_parameters
+      # — edit 00_config.py to switch values.
 
       tasks:
         - task_key: "setup"
           notebook_task:
             notebook_path: "../../notebooks/00_setup.py"
-            base_parameters:
-              sp_app_id: "${var.sp_app_id}"
           libraries:
             - whl: "../../dist/*.whl"
 
@@ -33,40 +32,13 @@ resources:
             - task_key: "setup"
           notebook_task:
             notebook_path: "../../notebooks/02_train_detector_air.py"
-            base_parameters:
-              epochs: "${var.train_epochs}"
-              lr: "1e-3"
-              batch_size: "8"
-              use_lora: "${var.use_lora}"
-              lora_rank: "8"
-              lora_alpha: "32"
-              gpus: "8"                                              # passed to @distributed
-              gpu_type: "h100"                                       # passed to @distributed
-          libraries:
-            - whl: "../../dist/*.whl"
-
-        - task_key: "register_and_alias"
-          depends_on:
-            - task_key: "train"
-          notebook_task:
-            notebook_path: "../../notebooks/04_deploy_serving.py"
-            base_parameters:
-              action: "register_and_set_candidate"
-              model_name: "cradio_detector"
           libraries:
             - whl: "../../dist/*.whl"
 
         - task_key: "deploy_endpoint"
           depends_on:
-            - task_key: "register_and_alias"
+            - task_key: "train"
           notebook_task:
             notebook_path: "../../notebooks/04_deploy_serving.py"
-            base_parameters:
-              action: "deploy_and_smoke_test"
-              model_name: "cradio_detector"
-              endpoint_name: "dais26-cradio-detector-${bundle.target}"
-              workload_size: "Small"
-              workload_type: "GPU_SMALL"
-              scale_to_zero: "${var.scale_to_zero}"
           libraries:
             - whl: "../../dist/*.whl"

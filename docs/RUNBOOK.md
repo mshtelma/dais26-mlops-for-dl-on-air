@@ -178,8 +178,8 @@ databricks serving-endpoints get dais26-cradio-detector-prod | jq '.config.serve
 Use this if C-RADIOv4 has a breaking change or is yanked from HuggingFace before the conference.
 
 **Important:** DINOv2-base is NOT a drop-in swap. It has different dimensions:
-- `summary_dim = 768` (vs 1152 for C-RADIOv4)
-- `spatial_dim = 768` (vs 1536 for C-RADIOv4)
+- `summary_dim = 768` (vs 1152 for C-RADIOv4-SO400M)
+- `spatial_dim = 768` (vs 1152 for C-RADIOv4-SO400M)
 
 All downstream artifacts must be rebuilt. Budget approximately 2 hours.
 
@@ -453,3 +453,146 @@ w.serving_endpoints.update_config_and_wait(
 ```
 
 Then re-run `scripts/probe_endpoint_gpu.py` and update `docs/BENCHMARKS.md` with the new baseline.
+
+---
+
+## Engineering rationale
+
+This section is the long-form home for "why we did it this way" notes that
+otherwise bloat source-file comments. Code references here use stable anchors
+(`#hf-cache-race`, `#hf-transfer-fuse-incompat`, `#ddp-trainable-only`,
+`#pip-requirements-rationale`) so a one-line pointer in code keeps working as
+the surrounding text evolves.
+
+### HF cache race {#hf-cache-race}
+
+**Symptom (legacy).** Cold-cache multi-rank runs of `AutoModel.from_pretrained`
+race on the trust_remote_code modules cache and on the weight shards. Survivor
+ranks see partially-written files and crash with `FileNotFoundError` —
+sometimes silently corrupting the cache for the next run.
+
+**Why naive `barrier()` doesn't fix it.** The obvious shape
+
+```python
+if is_rank0():
+    do_side_effect()
+barrier()   # other ranks waited
+use_side_effect()
+```
+
+still races: every rank then re-enters the same `from_pretrained` call,
+which itself does a fresh cache lookup + (sometimes) a partial download. The
+"use" step IS the race.
+
+**Fix.** Sequence-matched NCCL barriers — non-rank-0 hits its barrier *first*
+and waits, rank 0 performs the work and then hits its barrier. NCCL pairs
+calls by call-order, so the pairing is deterministic regardless of how many
+collectives the body itself does. Codified in
+`src/dais26_dentex/distributed/barrier_dance.py::rank0_first`. Used at one
+site today (`models/builder.py::build_detector`) and reusable for cache
+pre-warm, dataset stage-in, registration locks.
+
+### HF transfer / UC Volume FUSE incompatibility {#hf-transfer-fuse-incompat}
+
+**Symptom.** With `HF_HUB_ENABLE_HF_TRANSFER=1` and `cache_dir` pointing at a
+UC Volume FUSE mount, `huggingface_hub` downloads fail with
+`Io: Input/output error (os error 5) (no permits available)` or
+`Io: Operation not supported (os error 95)`. The `hf-xet` backend hits the
+same failure shape on FUSE.
+
+**Cause.** UC Volume FUSE rejects the parallel chunked writers used by both
+`hf_transfer` (Rust binary) and `hf-xet` (CAS service client). FUSE supports
+sequential writes only.
+
+**Fix.** Force `HF_HUB_ENABLE_HF_TRANSFER=0` and `HF_HUB_DISABLE_XET=1` before
+any HF library imports — both libraries read these once at constants-module
+import time, so setting them later is a no-op. Single canonical site:
+`src/dais26_dentex/platform/hf_env.py::configure_hf_env`. The `data/dentex_loader.py`
+module-level `setdefault` block handles dataset downloads where
+`configure_hf_env` is not in the call path.
+
+In notebooks, the env vars must be set inside the `@distributed` worker body,
+*before* `from dais26_dentex...` because cloudpickle resolves free variables
+on the worker eagerly. See `notebooks/02_train_detector_air.py` for the
+canonical pattern.
+
+### DDP trainable-only {#ddp-trainable-only}
+
+**Current.** `TrainerConfig.ddp_find_unused = True` because the backbone is
+frozen and DDP's reducer needs to know not to wait on grads from the frozen
+subtree. The cost is a per-iteration reducer scan over the entire backbone
+(inexpensive for a single-GPU smoke run, measurable on 8×H100).
+
+**Cleaner shape (deferred past Phase 5).** Pass only `requires_grad=True`
+parameters into the optimizer *and* hide the frozen subtree from DDP by
+wrapping only the head + FPN + (optional) LoRA parameters in DDP. With the
+frozen backbone outside DDP, `find_unused_parameters` flips to `False` and
+the per-iter reducer scan goes away.
+
+**Why deferred.** This is structural surgery: it changes the model-build
+shape, the state-dict layout (head/FPN are no longer accessed via `model.module.`),
+and the `DistributedDataParallel(...)` construction site. It needs an A/B run
+on 8 H100s before defaulting on. The current `find_unused_parameters=True`
+is correct, just not optimal — there is no correctness regression to chase.
+
+Tracked as a follow-up; flip the default by setting `ddp_find_unused: bool = False`
+once the trainable-only DDP wrap is in place and the 1-epoch val/loss matches
+within 5%.
+
+### `pip_requirements` source of truth {#pip-requirements-rationale}
+
+**Symptom (legacy).** The training pipeline hardcoded a `pip_requirements`
+list inside `train_detector.py`. The serving wheel's `pyproject.toml` had a
+parallel list. Adding a runtime dep (e.g. `timm` for C-RADIOv4
+trust_remote_code) required editing both — and the most common failure mode
+was forgetting the second site, which surfaced as a serving-endpoint
+deploy-time `ImportError`.
+
+**Fix.** Single source of truth in `pyproject.toml`:
+
+```toml
+[tool.dais26.serving-deps]
+detector = ["torch", "torchvision", "transformers", ...]
+```
+
+`platform/mlflow_io.py::serving_pip_requirements` reads this table at log
+time. CI guards it via `assert_serving_reqs_match_pyproject` — a non-empty
+list of strings is the syntactic contract; semantic completeness is verified
+by the CI smoke `mlflow models predict` against the logged pyfunc.
+
+**Wheel-bundled `pyproject.toml`.** The historical `_find_pyproject` walked
+up from `__file__` looking for `pyproject.toml`, which works against the
+source tree (notebooks, pytest) but fails inside AIR's ephemeral env where
+the package is installed under
+`/local_disk0/.ephemeral_nfs/envs/.../site-packages/dais26_dentex/...` —
+none of those parents contain a `pyproject.toml`, so log-time raises
+`FileNotFoundError: Could not locate pyproject.toml`. The fix ships
+`pyproject.toml` inside the wheel as `dais26_dentex/_pyproject.toml`
+(hatchling `force-include`) and `_find_pyproject` consults
+`importlib.resources` first, falling back to the source-tree walk for
+editable installs. Verify with:
+
+```bash
+python -m zipfile -l dist/*.whl | grep _pyproject.toml
+# → dais26_dentex/_pyproject.toml ...
+```
+
+**MLflow API drift.** The `name=` / `artifact_path=` rename across MLflow
+minor versions is detected once at import via `inspect.signature` rather than
+paid per-call as a `try/except TypeError`. See `_log_model_artifact_kwarg()`
+in the same module.
+
+### sgcli launch troubleshooting {#sgcli-launch}
+
+The terminal launch path (`sgcli/workload_train_detector.yaml`) snapshots
+the repo, runs `pip install .`, then `torchrun --nproc_per_node=$GPUS_PER_NODE
+-m dais26_dentex.train.cli`. The `cli` entrypoint reads
+`$HYPERPARAMETERS_PATH` (or `--config`), builds a `TrainerConfig`, and
+dispatches to `Trainer.run()`. Common failures:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `MODEL_URI=` missing from rank 0 stdout | Training succeeded on non-rank-0 ranks, rank 0 crashed in `_save_and_register` | Inspect rank-0 logs (`sgcli get logs <run-id> --rank 0`); MlflowReporter raises typed `AliasingError` instead of swallowing |
+| `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `sgcli`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
+| Hyperparameters from yaml ignored | yaml top-level shape mismatch | The sgcli yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
+| `experiment_name` from yaml clashes with `EXPERIMENT_NAME` from `notebooks/00_config.py` | Both surfaces define their own naming — intentional | Keep them independent; they target different runs (sgcli vs. notebook) |

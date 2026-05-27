@@ -8,14 +8,6 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("vs_index", "")
-dbutils.widgets.text("query_count", "50")
-
-vs_index_name = dbutils.widgets.get("vs_index").strip() or VS_INDEX_NAME
-query_count = int(dbutils.widgets.get("query_count"))
-
-# COMMAND ----------
-
 import numpy as np
 from databricks.sdk import WorkspaceClient
 
@@ -24,7 +16,7 @@ w = WorkspaceClient()
 val_df = (
     spark.table(TRAIN_EMBEDDINGS_TABLE)
     .filter("split = 'val'")
-    .limit(query_count)
+    .limit(SIMILARITY_QUERY_COUNT)
     .toPandas()
 )
 print(f"Querying with {len(val_df)} val images")
@@ -37,7 +29,7 @@ for _, row in val_df.iterrows():
     query_vec = list(map(float, row["embedding"]))
     expected = row["diagnosis"]
     res = w.vector_search_indexes.query_index(
-        index_name=vs_index_name,
+        index_name=VS_INDEX_NAME,
         columns=["image_id", "diagnosis", "split"],
         query_vector=query_vec,
         num_results=10,

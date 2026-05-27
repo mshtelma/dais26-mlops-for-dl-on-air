@@ -31,7 +31,7 @@ def mock_mlflow(monkeypatch):
 
 
 def test_resolve_alias_to_version(mock_mlflow):
-    from src.serve.endpoint_manager import resolve_alias_to_version
+    from dais26_dentex.serve.endpoint_manager import resolve_alias_to_version
 
     v = resolve_alias_to_version("cat", "sch", "mdl", "candidate")
     assert v == "5"
@@ -55,7 +55,7 @@ def test_capture_previous_champion_none(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "mlflow", FakeMlflowModule())
     monkeypatch.setitem(sys.modules, "mlflow.tracking", FakeTracking)
-    from src.serve.endpoint_manager import capture_previous_champion
+    from dais26_dentex.serve.endpoint_manager import capture_previous_champion
 
     assert capture_previous_champion("cat", "sch", "mdl") is None
 
@@ -69,7 +69,7 @@ def test_smoke_test_no_predictions(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "databricks", MagicMock())
     monkeypatch.setitem(sys.modules, "databricks.sdk", FakeSdkModule)
-    from src.serve.endpoint_manager import smoke_test_endpoint
+    from dais26_dentex.serve.endpoint_manager import smoke_test_endpoint
 
     ok, _err = smoke_test_endpoint("ep", b"x")
     assert ok is False

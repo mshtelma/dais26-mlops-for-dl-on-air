@@ -8,20 +8,20 @@ from typing import Any, Literal
 import numpy as np
 from scipy.spatial.distance import cdist
 
-from src.drift.reference import ReferenceDistribution, fit_reference
+from dais26_dentex.drift.reference import ReferenceDistribution, fit_reference
 
 logger = logging.getLogger(__name__)
 
 
 def _gaussian_kernel(x: np.ndarray, y: np.ndarray, bw: float) -> np.ndarray:
-    sq = cdist(x, y, 'sqeuclidean')
+    sq = cdist(x, y, "sqeuclidean")
     return np.exp(-sq / (2 * bw**2))
 
 
 def score_drift(
     incoming: np.ndarray,
     reference: ReferenceDistribution,
-    method: Literal['knn', 'mmd', 'energy'] | None = None,
+    method: Literal["knn", "mmd", "energy"] | None = None,
 ) -> float:
     """Compute a scalar drift score (higher = more drift).
 
@@ -33,15 +33,15 @@ def score_drift(
         raise ValueError(f"incoming must be 2-D non-empty, got {incoming.shape}")
     m = method or reference.method
 
-    if m == 'knn':
+    if m == "knn":
         if reference.knn_index is None:
             raise ValueError("Reference has no fitted KNN index")
         dists, _ = reference.knn_index.kneighbors(incoming)
         # mean over rows of the largest-K distance per row
         return float(dists[:, -1].mean())
 
-    if m == 'mmd':
-        bw = reference.params.get('bandwidth', 1.0)
+    if m == "mmd":
+        bw = reference.params.get("bandwidth", 1.0)
         kxx = _gaussian_kernel(incoming, incoming, bw)
         kyy = _gaussian_kernel(reference.embeddings, reference.embeddings, bw)
         kxy = _gaussian_kernel(incoming, reference.embeddings, bw)
@@ -52,11 +52,11 @@ def score_drift(
         kxy_mean = kxy.mean()
         return float(kxx_off + kyy_off - 2 * kxy_mean)
 
-    if m == 'energy':
+    if m == "energy":
         ref = reference.embeddings
-        d_xy = cdist(incoming, ref, 'euclidean').mean()
-        d_xx = cdist(incoming, incoming, 'euclidean').mean()
-        d_yy = cdist(ref, ref, 'euclidean').mean()
+        d_xy = cdist(incoming, ref, "euclidean").mean()
+        d_xx = cdist(incoming, incoming, "euclidean").mean()
+        d_yy = cdist(ref, ref, "euclidean").mean()
         return float(2 * d_xy - d_xx - d_yy)
 
     raise ValueError(f"Unknown method: {m}")
@@ -81,9 +81,9 @@ def bootstrap_drift_ci(
         scores.append(score_drift(incoming[idx], reference))
     arr = np.asarray(scores)
     return {
-        'mean': float(arr.mean()),
-        'p2_5': float(np.percentile(arr, 2.5)),
-        'p97_5': float(np.percentile(arr, 97.5)),
+        "mean": float(arr.mean()),
+        "p2_5": float(np.percentile(arr, 2.5)),
+        "p97_5": float(np.percentile(arr, 97.5)),
     }
 
 
@@ -92,9 +92,9 @@ def run_drift_monitor(
     backbone: Any,
     catalog: str,
     schema: str,
-    reference_table: str = 'train_embeddings',
-    inference_table: str = 'detector_inference_payload',
-    drift_scores_table: str = 'drift_scores',
+    reference_table: str = "train_embeddings",
+    inference_table: str = "detector_inference_payload",
+    drift_scores_table: str = "drift_scores",
     k: int = 50,
     alert_threshold: float = 2.0,
     lookback_hours: int = 1,
@@ -111,8 +111,8 @@ def run_drift_monitor(
 
     Returns: {'batch_id', 'knn_distance', 'mmd_score', 'n_images', 'alert', 'timestamp'}.
     """
-    from src.drift.embeddings import compute_embeddings
-    from src.drift.inference_table_reader import read_recent_inference_images
+    from dais26_dentex.drift.embeddings import compute_embeddings
+    from dais26_dentex.drift.inference_table_reader import read_recent_inference_images
 
     images = read_recent_inference_images(
         spark,
@@ -124,37 +124,37 @@ def run_drift_monitor(
     if not images:
         logger.info("No inference images in lookback window; skipping drift compute.")
         return {
-            'batch_id': str(uuid.uuid4()),
-            'knn_distance': 0.0,
-            'mmd_score': 0.0,
-            'n_images': 0,
-            'alert': False,
-            'timestamp': datetime.now(UTC).isoformat(),
+            "batch_id": str(uuid.uuid4()),
+            "knn_distance": 0.0,
+            "mmd_score": 0.0,
+            "n_images": 0,
+            "alert": False,
+            "timestamp": datetime.now(UTC).isoformat(),
         }
 
     incoming = compute_embeddings(backbone, images)
     ref_df = spark.table(f"{catalog}.{schema}.{reference_table}").select("embedding").toPandas()
-    ref_arr = np.stack(ref_df['embedding'].apply(np.asarray).to_list()).astype(np.float32)
-    reference = fit_reference(ref_arr, method='knn', k=k)
+    ref_arr = np.stack(ref_df["embedding"].apply(np.asarray).to_list()).astype(np.float32)
+    reference = fit_reference(ref_arr, method="knn", k=k)
 
-    knn = score_drift(incoming, reference, method='knn')
-    mmd = score_drift(incoming, reference, method='mmd')
+    knn = score_drift(incoming, reference, method="knn")
+    mmd = score_drift(incoming, reference, method="mmd")
     alert = knn > alert_threshold
 
     result: dict[str, Any] = {
-        'batch_id': str(uuid.uuid4()),
-        'knn_distance': float(knn),
-        'mmd_score': float(mmd),
-        'n_images': len(images),
-        'alert': bool(alert),
-        'timestamp': datetime.now(UTC).isoformat(),
+        "batch_id": str(uuid.uuid4()),
+        "knn_distance": float(knn),
+        "mmd_score": float(mmd),
+        "n_images": len(images),
+        "alert": bool(alert),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
     # Append to Delta
     try:
         from pyspark.sql import Row
 
         df = spark.createDataFrame([Row(**result)])
-        df.write.mode('append').saveAsTable(f"{catalog}.{schema}.{drift_scores_table}")
+        df.write.mode("append").saveAsTable(f"{catalog}.{schema}.{drift_scores_table}")
     except Exception as e:
         logger.error(f"Failed to write drift_scores: {e}")
     return result
