@@ -2,4 +2,8 @@ resources:
   experiments:
     vfm_experiment:
       name: "/Users/${workspace.current_user.userName}/dais26_vfm_experiment"
-      description: "DAIS26 Vision Foundation Model experiments (C-RADIOv4 frozen + RetinaNet head)"
+      tags:
+        - key: "project"
+          value: "dais26-vfm"
+        - key: "description"
+          value: "DAIS26 Vision Foundation Model experiments (C-RADIOv4 frozen + RetinaNet head)"

@@ -94,9 +94,15 @@ markers = [
 # Keep these aligned with the [project] dependencies table above; the
 # pyfunc only needs the deps used at predict-time.
 [tool.dais26.serving-deps]
+# torch/torchvision are PINNED to a CUDA 12.4 (cu124) build. GPU_SMALL (T4)
+# serving nodes ship an NVIDIA driver that reports CUDA 12.4; an unpinned
+# `torch` resolves to the newest wheel (cu126/cu128) whose runtime the older
+# driver cannot initialize -> `torch.cuda.is_available()` returns False and
+# the model silently falls back to CPU (0% GPU util, slow inference).
+# torch 2.6.0 / torchvision 0.21.0 default to cu124 on PyPI and load on driver 12.4.
 detector = [
-    "torch",
-    "torchvision",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
     "transformers",
     "mlflow",
     "Pillow",

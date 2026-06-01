@@ -51,12 +51,15 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
-        configure_hf_env(cache_dir)
+        # Bundled HF cache + no egress in the serving box -> force offline load.
+        offline = cache_dir is not None
+        configure_hf_env(cache_dir, offline=offline)
         self.backbone, self.info = load_backbone(
             name=backbone_config["name"],
             revision=backbone_config.get("revision"),
             cache_dir=cache_dir,
             device=device,
+            local_files_only=offline,
         )
         self.backbone.eval()
         if device == "cuda":

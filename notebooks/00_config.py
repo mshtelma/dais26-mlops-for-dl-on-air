@@ -9,9 +9,9 @@
 
 # COMMAND ----------
 # ---- Core UC config (edit here to switch environments) ----
-CATALOG = "main"
-SCHEMA = "mshtelma"
-BACKBONE = "cradio_v4_so400m"
+CATALOG = "mlops_pj"
+SCHEMA = "dais26_vfm"
+BACKBONE = "dinov3_vitl16"
 BACKBONE_REVISION = "main"
 
 # Table-name prefix so multiple DAIS26 projects can share one schema without colliding.
@@ -32,9 +32,35 @@ DRIFT_SCORES_TABLE = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}drift_scores"
 DETECTOR_INFERENCE_TABLE = f"{TABLE_PREFIX}detector_inference_payload"
 
 # COMMAND ----------
-# ---- UC-registered model names ----
-DETECTOR_MODEL_SHORT = "cradio_detector"
-DETECTOR_LORA_MODEL_SHORT = "cradio_detector_lora"
+# ---- UC-registered model names (backbone-aware) ----
+# Keyed by the BACKBONE literal so flipping BACKBONE above retargets the
+# detector model + endpoint cleanly and a DINOv3 run does NOT overwrite the
+# C-RADIO model. EXPERIMENT_NAME stays shared (see below) so all runs land in
+# one experiment for side-by-side comparison. The cradio entry preserves the
+# historical names for backward compatibility.
+_DETECTOR_NAMES_BY_BACKBONE: dict[str, dict[str, str]] = {
+    "cradio_v4_so400m": {
+        "model_short": "cradio_detector",
+        "endpoint": "dais26-cradio-detector-dev",
+    },
+    "dinov3_vitl16": {
+        "model_short": "dinov3_detector",
+        "endpoint": "dais26-dinov3-detector-dev",
+    },
+    "dinov2_base": {
+        "model_short": "dinov2_detector",
+        "endpoint": "dais26-dinov2-detector-dev",
+    },
+}
+_detector_names = _DETECTOR_NAMES_BY_BACKBONE.get(
+    BACKBONE, _DETECTOR_NAMES_BY_BACKBONE["cradio_v4_so400m"]
+)
+
+DETECTOR_MODEL_SHORT = _detector_names["model_short"]
+# Keep the LoRA short name backbone-aware too (cradio -> "cradio_detector_lora",
+# matching the historical value) so 02_train_detector_air.py's use_lora branch
+# stays consistent with DETECTOR_MODEL_SHORT.
+DETECTOR_LORA_MODEL_SHORT = f"{DETECTOR_MODEL_SHORT}_lora"
 EMBEDDER_MODEL_SHORT = "cradio_embedder"
 
 DETECTOR_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{DETECTOR_MODEL_SHORT}"
@@ -43,7 +69,7 @@ EMBEDDER_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{EMBEDDER_MODEL_SHORT}"
 
 # COMMAND ----------
 # ---- Serving + Vector Search names ----
-DETECTOR_ENDPOINT_NAME = "dais26-cradio-detector-dev"
+DETECTOR_ENDPOINT_NAME = _detector_names["endpoint"]
 EMBEDDER_ENDPOINT_NAME = "dais26-cradio-embedder-dev"
 
 VS_ENDPOINT_NAME = "dais26-vfm-vs"

@@ -4,41 +4,59 @@ resources:
       name: "dais26_train_detector_${bundle.target}"
       description: "Train frozen-backbone C-RADIOv4 + RetinaNet on AIR via @distributed (serverless GPU). Register @candidate, deploy endpoint via SDK, smoke test, promote to @champion."
       tags:
-        - key: "project"
-          value: "dais26-vfm"
-        - key: "component"
-          value: "training"
-      max_retries: 1
+        project: "dais26-vfm"
+        component: "training"
       timeout_seconds: 7200
+      # Queue if serverless GPU capacity isn't immediately available.
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
 
-      # NO job_clusters block — AIR-only. Every task is a serverless notebook task;
-      # Databricks resolves compute automatically. The train notebook's @distributed
-      # decorator dispatches GPU work to the H100 serverless GPU pool.
+      # AIR-only — no job_clusters. setup/deploy_endpoint run on the standard
+      # serverless env ("default"); the train task runs on Serverless GPU
+      # (8xH100, "databricks_ai_v5" base env) where the `serverless_gpu` package
+      # used by @distributed is preinstalled. The wheel is attached per-env via
+      # `dependencies` (serverless tasks reject the task-level `libraries` field).
       #
       # All notebook config (catalog / schema / backbone / hyperparameters /
       # endpoint / workload sizing) lives in notebooks/00_config.py and is
       # pulled in via `%run ./00_config`. No widget-style base_parameters
-      # — edit 00_config.py to switch values.
+      # — edit 00_config.py to switch values (incl. TRAIN_GPUS / TRAIN_GPU_TYPE,
+      # which must match the train task's hardware_accelerator below).
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
 
       tasks:
         - task_key: "setup"
           notebook_task:
             notebook_path: "../../notebooks/00_setup.py"
-          libraries:
-            - whl: "../../dist/*.whl"
+          environment_key: "default"
+          max_retries: 1
 
         - task_key: "train"
           depends_on:
             - task_key: "setup"
           notebook_task:
             notebook_path: "../../notebooks/02_train_detector_air.py"
-          libraries:
-            - whl: "../../dist/*.whl"
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_8xH100
+          max_retries: 1
 
         - task_key: "deploy_endpoint"
           depends_on:
             - task_key: "train"
           notebook_task:
             notebook_path: "../../notebooks/04_deploy_serving.py"
-          libraries:
-            - whl: "../../dist/*.whl"
+          environment_key: "default"
+          max_retries: 1

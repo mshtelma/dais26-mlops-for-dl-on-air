@@ -4,22 +4,48 @@ resources:
       name: "dais26_precompute_embeddings_${bundle.target}"
       description: "Run C-RADIOv4 backbone over DENTEX to produce summary embeddings (dim=1152) in Delta + Vector Search index. AIR-only via serverless notebook task."
       tags:
-        - key: "project"
-          value: "dais26-vfm"
-        - key: "component"
-          value: "embeddings"
-      max_retries: 1
+        project: "dais26-vfm"
+        component: "embeddings"
       timeout_seconds: 3600
 
       # NO job_clusters block — AIR-only. Serverless notebook task; the notebook
       # uses serverless GPU compute (single-GPU) for the embedding forward pass.
+      # The wheel is attached via the serverless `environments` block below
+      # (serverless tasks reject the task-level `libraries` field).
       #
       # All notebook config (catalog / schema / backbone / EMBEDDINGS_BATCH_SIZE)
       # lives in notebooks/00_config.py and is pulled in via `%run ./00_config`.
+
+      # Queue if serverless GPU capacity isn't immediately available.
+      queue:
+        enabled: true
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        # Single serverless GPU for the C-RADIOv4 / DINOv3 backbone forward pass.
+        # base_environment databricks_ai_v5 is the serverless-GPU base (mirrors
+        # the train task in train_detector.yml). NOTE: no environment_version on
+        # GPU envs — base_environment selects the runtime. precompute_embeddings
+        # does NOT use @distributed / serverless_gpu; it just runs torch on the
+        # GPU notebook driver (device = cuda if available).
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
 
       tasks:
         - task_key: "precompute"
           notebook_task:
             notebook_path: "../../notebooks/03_precompute_embeddings.py"
-          libraries:
-            - whl: "../../dist/*.whl"
+          environment_key: "gpu"
+          compute:
+            # Single serverless GPU. The CLI enum only accepts GPU_1xA10 /
+            # GPU_8xH100; A10 is plenty for ~1k frozen-backbone forward passes
+            # (and satisfies "single GPU, not 8xH100").
+            hardware_accelerator: GPU_1xA10
+          max_retries: 1

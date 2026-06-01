@@ -582,6 +582,71 @@ minor versions is detected once at import via `inspect.signature` rather than
 paid per-call as a `try/except TypeError`. See `_log_model_artifact_kwarg()`
 in the same module.
 
+### Models-from-code serving load path {#models-from-code}
+
+**Symptom 1 — `ModuleNotFoundError: transformers_modules`.** The endpoint
+deploy fails at model-server startup ("model server failed to load"). The
+detector was logged by pickling a `DetectorPyfunc()` instance in the training
+process; that pickle captured a reference to the HuggingFace *dynamic* backbone
+class. `trust_remote_code=True` (nvidia/C-RADIOv4-SO400M, facebook/dinov3-vitl16)
+generates that class at runtime inside the `transformers_modules.*` package,
+which does not exist in the serving container — so unpickling `python_model.pkl`
+raises `ModuleNotFoundError: No module named 'transformers_modules'`.
+
+**Symptom 2 — `ModuleNotFoundError: dais26_dentex`.** The pyfunc class lives in
+a locally-installed package (not on PyPI). MLflow cannot pin it in
+`requirements.txt`, so the serving container can't import the model class.
+
+**Fix.** Log the detector via **models-from-code** *and* bundle the package source:
+
+```python
+reporter.log_pyfunc(
+    python_model=".../serve/detector_model_script.py",  # a SCRIPT, not an instance
+    code_paths=[<dir of installed dais26_dentex>],       # default in log_pyfunc
+    ...
+)
+```
+
+`detector_model_script.py` is a 3-line module whose body is
+`set_model(DetectorPyfunc())`. MLflow stores the script as the model definition
+and re-executes it at load time (building a fresh `DetectorPyfunc`), so no
+HF dynamic class is ever serialized. `code_paths` copies the package into the
+model's `code/` dir and MLflow prepends it to `sys.path` at load — `import
+dais26_dentex` then works with no pip install. The trainer wires both at the
+single `_save_and_register` log site (`train/trainer.py`); there is no separate
+re-log step.
+
+**Offline backbone load.** The serving container has no egress. `load_context`
+forces `local_files_only=True` and the offline HF env (`HF_HUB_OFFLINE`) and
+reads the backbone from the `model_cache` artifact bundled with the model.
+Without this, `from_pretrained` tries to reach huggingface.co and the model
+server fails to start.
+
+**No `torch.compile` at serving.** `_maybe_compile` is a no-op. Wrapping the
+full `DetectionModel` makes TorchDynamo trace *into* the backbone on the first
+`predict`; the DINOv3 stack routes through transformers'
+`output_capturing.py`, whose module namespace does not bind `torch`, so the
+Dynamo-transformed frame raises `NameError: name 'torch' is not defined` during
+inference (the model still *loads* fine — `load_context` runs eagerly). CUDA
+graphs (`reduce-overhead`) also need static shapes the variable-size image path
+can't guarantee. The marginal latency win isn't worth the serving fragility.
+
+### torch/torchvision cu124 pin {#torch-cu124-pin}
+
+**Symptom.** The detector endpoint deploys and serves, but inference is slow and
+the GPU dashboard shows ~0% GPU utilization — the model silently ran on CPU.
+`torch.cuda.is_available()` returns `False` inside the container.
+
+**Cause.** GPU_SMALL serving nodes (NVIDIA T4) ship a driver that reports CUDA
+12.4. An unpinned `torch` in `[tool.dais26.serving-deps]` resolves to the newest
+PyPI wheel (cu126/cu128), whose CUDA runtime the 12.4 driver cannot initialize —
+torch falls back to CPU instead of erroring.
+
+**Fix.** Pin `torch==2.6.0` and `torchvision==0.21.0` in
+`[tool.dais26.serving-deps].detector`; those versions default to the cu124 build
+on PyPI and initialize cleanly on the 12.4 driver. Re-validate with
+`scripts/probe_endpoint_gpu.py` if you bump the versions.
+
 ### sgcli launch troubleshooting {#sgcli-launch}
 
 The terminal launch path (`sgcli/workload_train_detector.yaml`) snapshots

@@ -1,5 +1,5 @@
 experiment_name: dais26-mlops-for-dl-on-air
-run_name: dais26-mlopsfordl-cradio-v4-so400m-detector
+run_name: dais26-mlopsfordl-dinov3-vitl16-detector
 
 environment:
   dependencies: requirements.yaml
@@ -19,9 +19,13 @@ env_variables:
   # Falls back to the streaming downloader, which works on FUSE.
   HF_HUB_ENABLE_HF_TRANSFER: "0"
   HF_HUB_DOWNLOAD_TIMEOUT: "600"
-# Uncomment when switching backbone to gated DINOv3:
-# env_variables_secrets:
-#   HF_TOKEN: "dais26-secrets/hf-token"
+# DINOv3 is a gated HF model — inject the token from the secret scope so the
+# AIR GPU workers can authenticate the backbone download. load_backbone reads
+# os.environ.get("HF_TOKEN"). Create the scope/secret first (see docs):
+#   databricks secrets create-scope dais26-secrets
+#   databricks secrets put-secret dais26-secrets hf-token
+env_variables_secrets:
+  HF_TOKEN: "dais26-secrets/hf-token"
 
 compute:
   gpus: 8                          # 1 node (h100 = 8 GPUs/node); set 16 for 2-node scaling
@@ -47,7 +51,9 @@ code_source:
 parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
   catalog: mlops_pj                # CATALOG
   schema: dais26_vfm               # SCHEMA
-  backbone_name: cradio_v4_so400m  # BACKBONE — internal literal, NOT the HF id
+  backbone_name: dinov3_vitl16     # BACKBONE — internal literal, NOT the HF id
+  # `main` tracks the latest revision; pin a 40-char commit SHA here instead for
+  # reproducibility (mirrors the C-RADIO `revision` pin).
   backbone_revision: main          # BACKBONE_REVISION
   volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw   # VOLUME_PATH
   cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache    # CACHE_DIR
@@ -59,7 +65,7 @@ parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
   lora_rank: 8                     # TRAIN_LORA_RANK
   lora_alpha: 32.0                 # TRAIN_LORA_ALPHA
   img_size: 1024                   # train_detector default; no notebook override
-  model_name: cradio_detector      # DETECTOR_MODEL_SHORT (use_lora=false branch)
+  model_name: dinov3_detector      # DETECTOR_MODEL_SHORT (dinov3 backbone, use_lora=false branch)
   register_model: true
   set_candidate_alias: true
 

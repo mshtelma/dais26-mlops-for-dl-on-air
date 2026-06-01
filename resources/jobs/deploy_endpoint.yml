@@ -1,0 +1,22 @@
+resources:
+  jobs:
+    deploy_endpoint:
+      name: "dais26_deploy_endpoint_${bundle.target}"
+      description: "Standalone deploy of the @candidate detector to its serving endpoint (resolve -> create/update -> wait READY -> smoke test -> promote @champion). Runs 04_deploy_serving.py (DEPLOY_ACTION in 00_config). No GPU on the driver; the endpoint uses GPU serving compute."
+      tags:
+        project: "dais26-vfm"
+        component: "serving"
+      timeout_seconds: 3300
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "deploy_endpoint"
+          notebook_task:
+            notebook_path: "../../notebooks/04_deploy_serving.py"
+          environment_key: "default"

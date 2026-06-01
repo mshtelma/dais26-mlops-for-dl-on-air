@@ -56,7 +56,9 @@ if DEPLOY_ACTION == "deploy_and_smoke_test":
         ai_gateway_enabled=True,
         inference_table_prefix=f"{DETECTOR_MODEL_SHORT}_inference",
         promote_on_success=True,
-        timeout_seconds=900,
+        # GPU serving endpoints can take 20-40 min to cold-start on first deploy
+        # (container build + model download + GPU attach); 15 min was too short.
+        timeout_seconds=2400,
     )
     print(result)
     if not result.smoke_test_passed:
@@ -67,14 +69,31 @@ if DEPLOY_ACTION == "deploy_and_smoke_test":
 # COMMAND ----------
 
 if DEPLOY_ACTION == "create_vector_search":
+    # NOTE: a self-contained, always-on version of this logic lives in
+    # notebooks/04b_create_vector_search.py (run via the create_vector_search
+    # job). This branch is kept in sync with it.
     from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.vectorsearch import (
+        DeltaSyncVectorIndexSpecRequest,
+        EmbeddingVectorColumn,
+        EndpointType,
+        PipelineType,
+        VectorIndexType,
+    )
 
     w = WorkspaceClient()
+
+    # Derive the embedding dimension from the source table so this stays correct
+    # regardless of backbone (C-RADIOv4-SO400M=1152, DINOv3-ViTL16=1024).
+    source_table = TRAIN_EMBEDDINGS_TABLE
+    embedding_dim = int(
+        spark.sql(f"SELECT size(embedding) AS d FROM {source_table} LIMIT 1").collect()[0]["d"]
+    )
 
     # Create endpoint (if not exists)
     try:
         w.vector_search_endpoints.create_endpoint_and_wait(
-            name=VS_ENDPOINT_NAME, endpoint_type="STANDARD",
+            name=VS_ENDPOINT_NAME, endpoint_type=EndpointType.STANDARD,
         )
         print(f"Created VS endpoint: {VS_ENDPOINT_NAME}")
     except Exception as e:
@@ -83,22 +102,22 @@ if DEPLOY_ACTION == "create_vector_search":
         else:
             raise
 
-    # Create Delta Sync index with precomputed embeddings (dim=1152 for C-RADIOv4)
-    source_table = TRAIN_EMBEDDINGS_TABLE
-    print(f"Creating index {VS_INDEX_NAME} from {source_table}")
+    # Create Delta Sync index with precomputed (self-managed) embeddings
+    print(f"Creating index {VS_INDEX_NAME} from {source_table} (dim={embedding_dim})")
     try:
         w.vector_search_indexes.create_index(
             name=VS_INDEX_NAME,
             endpoint_name=VS_ENDPOINT_NAME,
             primary_key="image_id",
-            index_type="DELTA_SYNC",
-            delta_sync_index_spec={
-                "source_table": source_table,
-                "embedding_vector_column": "embedding",
-                "embedding_dimension": 1152,
-                "pipeline_type": "TRIGGERED",
-                "columns_to_sync": ["image_id", "diagnosis", "split"],
-            },
+            index_type=VectorIndexType.DELTA_SYNC,
+            delta_sync_index_spec=DeltaSyncVectorIndexSpecRequest(
+                source_table=source_table,
+                embedding_vector_columns=[
+                    EmbeddingVectorColumn(name="embedding", embedding_dimension=embedding_dim),
+                ],
+                pipeline_type=PipelineType.TRIGGERED,
+                columns_to_sync=["image_id", "diagnosis", "split"],
+            ),
         )
         print(f"Created VS index: {VS_INDEX_NAME}")
     except Exception as e:

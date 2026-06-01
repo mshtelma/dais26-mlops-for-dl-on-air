@@ -98,20 +98,59 @@ class DinoV2Wrapper(nn.Module):
         raise RuntimeError(f"Unexpected DINOv2 output type: {type(out)}")
 
 
+class DinoV3Wrapper(nn.Module):
+    """Wraps HuggingFace DINOv3 to provide consistent (summary, spatial_features) output.
+
+    HF `AutoModel` for `facebook/dinov3-vitl16-pretrain-lvd1689m` returns a
+    `BaseModelOutputWithPooling` (a `ModelOutput` dict subclass) whose
+    `.last_hidden_state` has shape (B, 1 + num_register_tokens + T, D), with the
+    prefix laid out as [CLS, register tokens...]. This differs from DINOv2's
+    `x_norm_clstoken` / `x_norm_patchtokens` dict keys, so the DINOv2 wrapper
+    cannot be reused here.
+
+    summary = last_hidden_state[:, 0, :]                   (CLS token)
+    spatial = last_hidden_state[:, 1 + num_register_tokens:, :]  (patch tokens only)
+
+    Stripping CLS + register tokens is load-bearing: at 1024px / patch16 the
+    spatial output must be exactly 64*64 = 4096 patch tokens so `FPNAdapter`
+    and `DetectionModel.forward` (ph,pw = H//16, W//16) pass the token-count
+    assertion. `num_register_tokens` is read from `model.config` rather than
+    hardcoded so a config change doesn't silently misalign the grid.
+    """
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        self.model = model
+        # 1 CLS token + N register tokens precede the patch tokens.
+        self.num_prefix = 1 + int(getattr(model.config, "num_register_tokens", 0))
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        out = self.model(images)
+        last = out.last_hidden_state  # (B, 1 + R + T, D)
+        summary = last[:, 0, :]  # CLS -> (B, D)
+        spatial = last[:, self.num_prefix:, :]  # drop CLS + R registers -> (B, T, D)
+        return summary, spatial
+
+
 def load_backbone(
     name: BackboneName,
     revision: str | None = None,
     cache_dir: str | None = None,
     device: str = "cuda",
+    local_files_only: bool = False,
 ) -> tuple[nn.Module, BackboneInfo]:
     """Load a vision backbone, return wrapped model + dimension info.
 
     cache_dir is honored via HF_HOME env override (so HF caches go to UC Volume).
     Returned backbone is frozen (requires_grad_=False) and in eval() mode.
+
+    local_files_only forces a strictly-offline load from the cache (set at
+    serving time, where the HF cache is bundled into the model artifact and the
+    container has no egress). It also flips the HF offline env flags.
     """
     from dais26_dentex.platform.hf_env import configure_hf_env
 
-    configure_hf_env(cache_dir)
+    configure_hf_env(cache_dir, offline=local_files_only)
 
     if name == "cradio_v4_so400m":
         _assert_cradio_runtime_deps()
@@ -122,6 +161,7 @@ def load_backbone(
             trust_remote_code=True,
             revision=revision,
             cache_dir=cache_dir,
+            local_files_only=local_files_only,
         )
         wrapped = CRadioWrapper(model)
         info = BackboneInfo(
@@ -141,8 +181,9 @@ def load_backbone(
             token=token,
             revision=revision,
             cache_dir=cache_dir,
+            local_files_only=local_files_only,
         )
-        wrapped = DinoV2Wrapper(model)  # DINOv3 output structure similar to DINOv2 for our purposes
+        wrapped = DinoV3Wrapper(model)  # HF BaseModelOutputWithPooling: strip CLS + register tokens
         info = BackboneInfo(
             name="dinov3_vitl16",
             summary_dim=1024,

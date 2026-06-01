@@ -41,6 +41,18 @@ in editable mode so changes to `src/dais26_dentex/` are immediately reflected. N
 in `notebooks/00_config.py` — there are no `dbutils.widgets` and no DAB `base_parameters`; edit the
 config file before launching.
 
+**All UC names are config-driven from `notebooks/00_config.py`.** The current defaults are:
+
+| Config knob | Default | Drives |
+|-------------|---------|--------|
+| `CATALOG` | `mlops_pj` | catalog for all schemas/tables/models |
+| `SCHEMA` | `dais26_vfm` | schema |
+| `TABLE_PREFIX` | `dais26_dentex_` | table/index prefix so multiple projects share one schema (e.g. `dais26_dentex_train_embeddings`) |
+| `BACKBONE` | `dinov3_vitl16` | backbone + the backbone-keyed model/endpoint names (`dinov3_detector`, `dais26-dinov3-detector-dev`) |
+
+Switch `BACKBONE` to `cradio_v4_so400m` for the ungated C-RADIOv4 path. The command examples below
+use the legacy `ml_dev` / `cradio_detector` names; substitute your configured values.
+
 ### Step 3 — Authenticate with Databricks
 
 ```bash
@@ -178,12 +190,25 @@ databricks bundle run train_detector -t dev --params train_epochs=1
 databricks bundle run precompute_embeddings -t dev
 ```
 
-This runs `03_precompute_embeddings.py` on an AIR H100 cluster, which:
-- Computes C-RADIOv4 `summary` embeddings (dim 1152) for all 1005 DENTEX images
-- Writes to `ml_dev.dais26_vfm.train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
-- Creates the Mosaic AI Vector Search index `ml_dev.dais26_vfm.embeddings_index`
+This runs `03_precompute_embeddings.py` on serverless GPU, which:
+- Computes the backbone `summary` embeddings (C-RADIOv4: dim 1152, DINOv3: dim 1024) for all 1005 DENTEX images
+- Writes to `<catalog>.<schema>.<prefix>train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
 
-Wait for completion (~15-20 minutes).
+Wait for completion (~15-20 minutes). The Vector Search index is **not** created here unless
+`EMBEDDINGS_VS_ENDPOINT` and `EMBEDDINGS_VS_INDEX` are both set in `00_config.py`; otherwise create
+it explicitly in the next step.
+
+### Step 9b — Create the Vector Search endpoint + index
+
+```bash
+databricks bundle run create_vector_search -t dev
+```
+
+This runs `04b_create_vector_search.py` (no GPU), which idempotently creates the VS endpoint
+(`dais26-vfm-vs`) and a DELTA_SYNC index over the embeddings table, triggers a sync, waits for the
+index to come `ONLINE`, and runs a smoke-test similarity query. The embedding dimension is **derived
+from the source table** (not hardcoded), so it stays correct for any backbone. The job fails fast
+if the embeddings table from step 9 is empty.
 
 ### Step 10 — Smoke test the detector endpoint
 
@@ -231,7 +256,7 @@ w = WorkspaceClient()
 results = w.vector_search_indexes.query_index(
     index_name="ml_dev.dais26_vfm.embeddings_index",
     columns=["image_id", "diagnosis"],
-    query_vector=[0.0] * 1152,   # backbone_info.summary_dim for C-RADIOv4
+    query_vector=[0.0] * 1152,   # backbone summary_dim: C-RADIOv4=1152, DINOv3-ViTL16=1024
     num_results=10,
 )
 
@@ -283,6 +308,11 @@ Node type defaults: AWS `g5.12xlarge` (4x A10G), Azure `Standard_NC24ads_A100_v4
 | `FileNotFoundError: Could not locate pyproject.toml` at log-time | Stale wheel built before the `force-include` block was added | Re-run `uv build`; verify with `python -m zipfile -l dist/*.whl \| grep _pyproject.toml` |
 | `ModuleNotFoundError: timm` / `einops` / `open_clip` at serving | Runtime dep missing from `[tool.dais26.serving-deps].detector` | Add to that table in `pyproject.toml`; `assert_serving_reqs_match_pyproject` is the CI guard |
 | `trust_remote_code` error loading C-RADIOv4 | Transformers version mismatch | Pin `transformers>=4.48.0` in your cluster; check pyproject.toml |
+| Endpoint `DEPLOYMENT_FAILED` / `ModuleNotFoundError: transformers_modules` at model-server load | Model logged as a pickled pyfunc instance captured the dynamic `trust_remote_code` backbone class | Already fixed — the trainer logs via **models-from-code** (`serve/detector_model_script.py`). Re-train (or re-log) against current code; do not pickle a `DetectorPyfunc()` instance |
+| `ModuleNotFoundError: dais26_dentex` at serving | Package source not bundled with the model | `MlflowReporter.log_pyfunc` passes `code_paths=[<dais26_dentex dir>]` by default; verify the model's `code/` dir contains the package |
+| Endpoint serves on CPU (0% GPU util, slow) on GPU_SMALL | Unpinned `torch` resolved to a cu126/cu128 wheel the T4 driver (CUDA 12.4) can't init → `torch.cuda.is_available()` is False | Keep `torch==2.6.0` / `torchvision==0.21.0` (cu124) pinned in `[tool.dais26.serving-deps]` |
+| C-RADIOv4/DINOv3 backbone tries to reach huggingface.co at serving and fails to start | Online HF load in an egress-less serving container | Serving forces `local_files_only` + offline HF env from the bundled `model_cache` artifact (handled in `detector_pyfunc.load_context`) |
+| DINOv3 backbone download 401/403 during training | Gated repo, missing HF token | Put the token in secret `dais26-secrets/hf-token`; `02_train_detector_air.py` reads it on the driver and forwards `HF_TOKEN` into the `@distributed` worker |
 | HF download fails with `os error 5` / `os error 95` on AIR | `HF_HUB_ENABLE_HF_TRANSFER=1` or `hf-xet` writing to UC Volume FUSE | Set `HF_HUB_ENABLE_HF_TRANSFER=0` and `HF_HUB_DISABLE_XET=1` *before* importing `dais26_dentex` (use `platform.hf_env.configure_hf_env`) — see [RUNBOOK.md#hf-transfer-fuse-incompat](RUNBOOK.md#hf-transfer-fuse-incompat) |
 | Cold-cache HF download deadlock on multi-rank run | Naive `barrier()` doesn't fix the from_pretrained race | Use `distributed.barrier_dance.rank0_first` (already wired in `models/builder.py`) — see [RUNBOOK.md#hf-cache-race](RUNBOOK.md#hf-cache-race) |
 | `BarrierTimeoutError` from `safe_barrier` | A rank crashed earlier; NCCL would have hung silently | Inspect ranks' logs in order; the bounded wait surfaces the dead-rank instead of hanging |

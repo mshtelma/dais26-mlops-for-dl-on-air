@@ -63,7 +63,7 @@ from dais26_dentex.models.detection_head import (
 from dais26_dentex.models.targets import build_targets_for_batch
 from dais26_dentex.platform.mlflow_io import AliasingError, MlflowReporter
 from dais26_dentex.platform.uc import UCName
-from dais26_dentex.serve.detector_pyfunc import DetectorPyfunc, build_signature_and_example
+from dais26_dentex.serve.detector_pyfunc import build_signature_and_example
 from dais26_dentex.train.losses import detection_loss
 
 logger = logging.getLogger(__name__)
@@ -251,8 +251,10 @@ class Trainer:
         bare = cast(DetectionModel, unwrap_model(model))
 
         # Source the COCO ground-truth file from the canonical-split path
-        # used by `dentex_loader.load_canonical_split`.
-        gt_path = Path(cfg.volume_path or ".") / "canonical" / "val.json"
+        # written by `convert_to_coco` and read by `dentex_loader.load_canonical_split`
+        # (i.e. `{volume_path}/annotations/{split}.json` — NOT `canonical/`, which
+        # never existed; the old path silently skipped val mAP every epoch).
+        gt_path = Path(cfg.volume_path or ".") / "annotations" / "val.json"
         if not gt_path.exists():
             logger.warning("Val GT not found at %s; skipping mAP.", gt_path)
             return {}
@@ -343,8 +345,15 @@ class Trainer:
                 artifacts["model_cache"] = cfg.cache_dir
 
             signature, example = build_signature_and_example()
+            # Models-from-code: pass the loader SCRIPT path (not a DetectorPyfunc()
+            # instance). Pickling the instance captured an HF `transformers_modules.*`
+            # backbone reference that the serving container can't import. The script
+            # is re-executed at load time instead. See detector_model_script.py.
+            from dais26_dentex.serve import detector_pyfunc as _dp
+
+            model_script = str(Path(_dp.__file__).with_name("detector_model_script.py"))
             reporter.log_pyfunc(
-                python_model=DetectorPyfunc(),
+                python_model=model_script,
                 artifacts=artifacts,
                 signature=signature,
                 input_example=example,

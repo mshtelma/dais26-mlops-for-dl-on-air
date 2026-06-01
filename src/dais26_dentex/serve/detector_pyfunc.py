@@ -79,6 +79,7 @@ def _build_detection_model(
     nms_iou_threshold: float,
     score_threshold: float,
     max_detections: int,
+    local_files_only: bool = False,
 ) -> tuple[Any, Any]:
     """Build a `DetectionModel` and return ``(model, info)``.
 
@@ -86,6 +87,9 @@ def _build_detection_model(
     ``models.builder.build_detector``) because the trainer's builder
     expects a ``TrainerConfig`` shape and the pyfunc has artifact-shaped
     inputs instead.
+
+    ``local_files_only`` is set at serving time to force a strictly-offline
+    backbone load from the bundled HF cache (no egress in the serving box).
     """
     from dais26_dentex.models.backbones import load_backbone
     from dais26_dentex.models.detection_head import DetectionModel
@@ -95,6 +99,7 @@ def _build_detection_model(
         revision=backbone_revision,
         cache_dir=cache_dir,
         device=device,
+        local_files_only=local_files_only,
     )
     model = DetectionModel(
         backbone=backbone,
@@ -123,14 +128,23 @@ def _load_state_into(model: Any, state_path: str, device: str) -> None:
 
 
 def _maybe_compile(model: Any, device: str) -> Any:
-    """Best-effort `torch.compile` on GPU; no-op on CPU/exception."""
-    if device != "cuda":
-        return model
-    try:
-        return torch.compile(model, mode="reduce-overhead")
-    except Exception as e:
-        logger.warning("torch.compile failed (%s); continuing uncompiled", e)
-        return model
+    """Return the model uncompiled at serving time.
+
+    ``torch.compile`` is intentionally NOT applied here. The frozen HF
+    transformer backbones (``facebook/dinov3-vitl16``, ``nvidia/C-RADIOv4``)
+    run fine eagerly — training + validation forward them in eager mode — but
+    wrapping the full ``DetectionModel`` with ``torch.compile`` makes
+    TorchDynamo trace *into* the backbone at the first ``predict`` call. The
+    DINOv3 modeling stack routes through transformers' output-capturing
+    decorator (``transformers/utils/output_capturing.py``), whose module
+    namespace does not bind ``torch``; the Dynamo-transformed frame then raises
+    ``NameError: name 'torch' is not defined`` during inference (the model
+    still *loads* fine, since ``load_context`` runs eagerly). ``reduce-overhead``
+    (CUDA graphs) also needs static shapes, which the variable-size image input
+    path does not guarantee. The marginal latency win is not worth the serving
+    fragility, so we serve the eager module.
+    """
+    return model
 
 
 def _predict_batch(
@@ -213,7 +227,11 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
-        configure_hf_env(cache_dir)
+        # Serving bundles the HF cache as an artifact and the container has no
+        # egress — force a strictly-offline load so trust_remote_code does not
+        # try to reach huggingface.co (which fails model-server startup).
+        offline = cache_dir is not None
+        configure_hf_env(cache_dir, offline=offline)
 
         model, _info = _build_detection_model(
             backbone_name=manifest.backbone.name,
@@ -226,6 +244,7 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             nms_iou_threshold=manifest.detector.nms_iou_threshold,
             score_threshold=manifest.detector.score_threshold,
             max_detections=manifest.detector.max_detections,
+            local_files_only=offline,
         )
         _load_state_into(model, artifacts["model_state"], device)
         model.eval()
@@ -290,7 +309,8 @@ class DetectorPyfuncV1(mlflow.pyfunc.PythonModel):
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
-        configure_hf_env(cache_dir)
+        offline = cache_dir is not None
+        configure_hf_env(cache_dir, offline=offline)
 
         model, _info = _build_detection_model(
             backbone_name=backbone_config["name"],
@@ -303,6 +323,7 @@ class DetectorPyfuncV1(mlflow.pyfunc.PythonModel):
             nms_iou_threshold=detection_config["nms_iou_threshold"],
             score_threshold=detection_config["score_threshold"],
             max_detections=detection_config["max_detections"],
+            local_files_only=offline,
         )
         _load_state_into(model, artifacts[MODEL_STATE_FILE.split(".")[0]], device)
         model.eval()

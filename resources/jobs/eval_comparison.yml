@@ -1,0 +1,50 @@
+resources:
+  jobs:
+    eval_comparison:
+      name: "dais26_eval_comparison_${bundle.target}"
+      description: "Re-evaluate every registered detector (C-RADIOv4 + DINOv3) on the same held-out DENTEX split through the serving pyfunc and score with COCO mAP — apples-to-apples, independent of train-time logged metrics. Runs 09_eval_comparison.py on a single serverless GPU."
+      tags:
+        project: "dais26-vfm"
+        component: "evaluation"
+      timeout_seconds: 3600
+
+      # NO job_clusters block — AIR-only. Serverless notebook task; the notebook
+      # loads each registered detector pyfunc onto a single serverless GPU and
+      # runs frozen-backbone forward passes over the eval split. The wheel is
+      # attached via the serverless `environments` block below (serverless tasks
+      # reject the task-level `libraries` field).
+      #
+      # All config (catalog / schema, and the EVAL_SPLIT / alias knobs) lives in
+      # the notebook + 00_config.py, pulled in via `%run ./00_config`.
+
+      # Queue if serverless GPU capacity isn't immediately available.
+      queue:
+        enabled: true
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        # Single serverless GPU for the backbone forward passes. base_environment
+        # databricks_ai_v5 is the serverless-GPU base (mirrors precompute_embeddings
+        # + the train task). NOTE: no environment_version on GPU envs —
+        # base_environment selects the runtime.
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "eval_comparison"
+          notebook_task:
+            notebook_path: "../../notebooks/09_eval_comparison.py"
+          environment_key: "gpu"
+          compute:
+            # Single serverless GPU. The CLI enum only accepts GPU_1xA10 /
+            # GPU_8xH100; A10 is plenty for ~50-250 frozen-backbone forward
+            # passes per backbone.
+            hardware_accelerator: GPU_1xA10
+          max_retries: 1
