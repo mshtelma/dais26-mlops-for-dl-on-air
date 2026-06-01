@@ -139,7 +139,11 @@ def precompute_embeddings(
         # Build Spark rows
         rows = [
             Row(
-                image_id=str(ids[i]),
+                # Split-scope the id: raw COCO image ids restart per split, so
+                # they collide across train/val/test. image_id is the Vector
+                # Search primary key, so colliding ids silently dedupe the index
+                # (e.g. 1005 rows -> 706). Prefix with split for global uniqueness.
+                image_id=f"{split}_{ids[i]}",
                 embedding=embeddings_arr[i].tolist(),
                 diagnosis=diagnoses[i],
                 split=split,
