@@ -24,6 +24,37 @@ def find_target_modules(backbone: nn.Module, patterns: Iterable[str] = ("qkv", "
     return targets
 
 
+def unfreeze_last_blocks(backbone: nn.Module, n: int) -> int:
+    """Unfreeze the last ``n`` transformer blocks of a (frozen) backbone.
+
+    Heuristic but backbone-agnostic: ViT stacks (timm C-RADIO, HF DINOv3) hold
+    their encoder layers in an ``nn.ModuleList``; we pick the LARGEST such list
+    (the block stack) and flip ``requires_grad`` on its last ``n`` entries, and
+    put those blocks in ``train()`` mode. Returns the number of params unfrozen.
+
+    Raises if no ``ModuleList`` is found so a backbone whose layout we don't
+    understand fails loudly instead of silently training nothing.
+    """
+    if n <= 0:
+        return 0
+    module_lists = [m for _, m in backbone.named_modules() if isinstance(m, nn.ModuleList)]
+    if not module_lists:
+        raise RuntimeError(
+            "unfreeze_last_blocks: no nn.ModuleList found in backbone; pass an explicit "
+            "module path or use backbone_mode='full' instead."
+        )
+    blocks = max(module_lists, key=len)
+    selected = list(blocks)[-n:]
+    unfrozen = 0
+    for blk in selected:
+        blk.train()
+        for p in blk.parameters():
+            p.requires_grad_(True)
+            unfrozen += p.numel()
+    logger.info("Unfroze last %d of %d backbone blocks (%d params).", len(selected), len(blocks), unfrozen)
+    return unfrozen
+
+
 def apply_lora(
     backbone: nn.Module,
     rank: int = 8,

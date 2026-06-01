@@ -6,7 +6,9 @@ resources:
       tags:
         project: "dais26-vfm"
         component: "training"
-      timeout_seconds: 7200
+      # 8h: full C-RADIO backbone fine-tune + longer schedules need headroom on
+      # the H100 pool (the frozen-head recipe finished well under 2h).
+      timeout_seconds: 28800
       # Queue if serverless GPU capacity isn't immediately available.
       queue:
         enabled: true

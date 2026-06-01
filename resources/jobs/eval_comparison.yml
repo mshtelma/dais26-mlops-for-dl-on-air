@@ -6,7 +6,10 @@ resources:
       tags:
         project: "dais26-vfm"
         component: "evaluation"
-      timeout_seconds: 3600
+      # 2h: GPU queue wait + databricks_ai_v5 cold-start + loading two ViT
+      # backbones (C-RADIOv4 + DINOv3) eats most of an hour before the (small,
+      # 50-image) eval even starts. 1h timed out mid-load.
+      timeout_seconds: 7200
 
       # NO job_clusters block — AIR-only. Serverless notebook task; the notebook
       # loads each registered detector pyfunc onto a single serverless GPU and

@@ -28,7 +28,9 @@ compute:
   gpu_type: h100
 
 max_retries: 1
-timeout_minutes: 180
+# 8h: full backbone fine-tune + longer schedules (and multi-trial sweeps that
+# reuse this workload) must not be killed mid-run on the H100 pool.
+timeout_minutes: 480
 
 code_source:
   type: snapshot

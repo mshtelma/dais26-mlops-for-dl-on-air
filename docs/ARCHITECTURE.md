@@ -192,6 +192,52 @@ The training core (`Trainer`) is identical across launch paths — `notebook @di
 or `sgcli` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
 or `--config`, builds the `TrainerConfig`, and dispatches to the same `Trainer.run()`.
 
+### Phase 2b (optional): `databricks bundle run hpo_sweep -t dev`
+
+A hyperparameter sweep that tunes both the detector head **and** the C-RADIO / DINOv3
+backbone, sharing the exact same `Trainer` core as the single-run path.
+
+```
+1. setup            (notebooks/00_setup.py)
+   |
+   v
+2. sweep            (notebooks/02b_hpo_sweep.py, serverless notebook → GPU_8xH100)
+   Parent MLflow run = the sweep. For each trial from sweep.iter_trials():
+     - merge base TrainerConfig with the trial's param overrides
+     - @distributed → H100 pool → Trainer(cfg).run() (SWEEP_TRIAL_EPOCHS each)
+     - child run tagged mlflow.parentRunId=<sweep> + sweep_trial_id=<n>
+   After all trials: sweep.select_best() picks the winner by SWEEP_PRIMARY_METRIC.
+   If SWEEP_REGISTER_WINNER: re-train the winner for full TRAIN_EPOCHS with
+     register_model=True + set_candidate_alias=True → @candidate.
+   |
+   v
+3. deploy_endpoint  (notebooks/04_deploy_serving.py — same as Phase 2)
+```
+
+What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
+
+| Knob | Why it's swept |
+|------|----------------|
+| `lr`, `backbone_lr` | discriminative LRs — head learns fast, backbone fine-tunes slowly |
+| `backbone_mode` | `frozen` / `lora` / `partial` / `full` — how much of the encoder to fine-tune |
+| `backbone_trainable_blocks` | depth of unfreeze for `partial` mode |
+| `anchor_mode` (→ `anchor_scales`/`aspect_ratios`) | addresses the per-level anchor over-generation flagged by `arch_probe` |
+| `focal_*`, `weight_decay`, `warmup` | head-side regularization / optimization |
+
+The search space, strategy (`random` / `grid`), trial budget, per-trial epochs, primary
+metric, and whether to register the winner are all config-driven via the `SWEEP_*` block in
+`notebooks/00_config.py`. Trial generation/selection logic lives in `train/sweep.py`
+(`iter_trials` + `select_best`) — pure functions with no torch/mlflow dependency, so they
+are unit-tested in isolation. The sweep job carries an **8-hour** timeout (`timeout_seconds:
+28800`) and runs on `GPU_8xH100`.
+
+> **Architecture audit first.** Before sweeping, run `notebooks/02a_arch_probe.py`. It builds a
+> live detector and runs `models/arch_probe.probe_detection_model` to report anchor counts,
+> positive-anchor fraction per FPN level, delta-clamp overflow, and NMS mode, alongside the
+> static `KNOWN_ISSUES` register (e.g. every anchor scale emitted at every FPN level, which
+> dilutes the positive ratio and is a prime suspect for the ~3% mAP@50 ceiling). The sweep's
+> `anchor_mode` knob exists to test the fix.
+
 ### Phase 3: `databricks bundle run precompute_embeddings -t dev`
 
 ```
@@ -478,13 +524,20 @@ src/dais26_dentex/
 │
 ├── models/
 │   ├── backbones.py          (BackboneInfo dataclass — single source of truth;
-│   │                          C-RADIOv4 trust_remote_code dep guard)
+│   │                          C-RADIOv4 trust_remote_code dep guard;
+│   │                          load_backbone(freeze=) gates train vs frozen)
 │   │     ↑ consumed by everything below
 │   ├── adapters.py           (FPNAdapter; in_channels=backbone_info.spatial_dim)
-│   ├── builder.py            (build_detector wrapped in rank0_first)
-│   ├── detection_head.py     (RetinaNetHead; input from FPNAdapter)
+│   ├── builder.py            (build_detector wrapped in rank0_first; branches on
+│   │                          backbone_mode frozen/lora/full/partial; honors
+│   │                          cfg.anchor_scales/aspect_ratios)
+│   ├── detection_head.py     (RetinaNetHead; forward_train gates backbone
+│   │                          no_grad on whether the encoder is frozen)
 │   ├── targets.py            (anchor generator + target encoding; FPNLevel)
-│   └── peft.py               (STRETCH: LoRA on backbone QKV+proj)
+│   ├── arch_probe.py         (read-only consistency probe + KNOWN_ISSUES register;
+│   │                          driven by notebooks/02a_arch_probe.py)
+│   └── peft.py               (LoRA on backbone QKV+proj; unfreeze_last_blocks for
+│                              backbone_mode=partial)
 │
 ├── platform/
 │   ├── hf_env.py             (configure_hf_env: HF_HOME, TRANSFORMERS_CACHE,
@@ -517,12 +570,16 @@ src/dais26_dentex/
 └── train/
     ├── trainer.py            (Trainer class — owns DDP wrap, _epoch_loop,
     │                          _validate, _save_and_register; rank-0-only
-    │                          MlflowReporter + UC registration)
+    │                          MlflowReporter + UC registration; discriminative-LR
+    │                          param groups when the backbone is trainable)
     ├── train_detector.py     (thin shim: builds TrainerConfig, calls Trainer(cfg).run())
+    ├── sweep.py              (pure HPO helpers: iter_trials grid/random +
+    │                          select_best; no torch/mlflow — unit-tested)
     ├── losses.py             (focal + smooth-L1)
     └── cli.py                (sgcli/torchrun entrypoint — reads
-                               $HYPERPARAMETERS_PATH or --config; prints
-                               MODEL_URI=<run_id> on rank 0)
+                               $HYPERPARAMETERS_PATH or --config; builds
+                               TrainerConfig and runs Trainer(cfg).run() so every
+                               YAML knob is honored; prints MODEL_URI=<run_id>)
 ```
 
 ### Cross-cutting hardening anchors

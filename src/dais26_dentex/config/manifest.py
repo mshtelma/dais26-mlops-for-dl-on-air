@@ -58,6 +58,11 @@ class BackboneSpec:
     summary_dim: int
     spatial_dim: int
     patch_size: int
+    # How the backbone was trained: frozen | lora | full | partial. Drives
+    # whether the serving loader must restore fine-tuned backbone weights from
+    # the saved state dict (full/partial) instead of re-fetching the pretrained
+    # encoder from HF. Defaults to "frozen" so pre-existing manifests load.
+    trained_mode: str = "frozen"
 
 
 @dataclass(frozen=True, slots=True)

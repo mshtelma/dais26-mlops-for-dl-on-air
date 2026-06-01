@@ -133,7 +133,7 @@ This deploys **only** UC resources and job definitions. It does **not** deploy s
 What gets created:
 - UC schema `ml_dev.dais26_vfm` with volumes `dentex_raw` and `model_cache`
 - MLflow experiment `/Users/<you>/dais26_vfm_experiment`
-- Job definitions: `train_detector`, `precompute_embeddings`, `drift_monitor`
+- Job definitions: `train_detector`, `hpo_sweep`, `precompute_embeddings`, `drift_monitor`
 - Secret scope `dais26-secrets` (for optional DINOv3 path)
 
 ### Step 7 — Run the training job (Phase 2)
@@ -183,6 +183,40 @@ To run a faster 1-epoch validation gate instead of 10 epochs:
 ```bash
 databricks bundle run train_detector -t dev --params train_epochs=1
 ```
+
+### Step 8b (optional) — Hyperparameter sweep (Phase 2b)
+
+If the single training run plateaus (the DENTEX detector has historically hit a ~3% mAP@50
+ceiling), run the HPO sweep, which tunes the detector head **and** fine-tunes the
+C-RADIO / DINOv3 backbone:
+
+```bash
+# 1. (recommended) audit the architecture first — anchors, positive ratio, NMS, delta clamp
+databricks bundle run train_detector -t dev   # or open notebooks/02a_arch_probe.py and run all
+
+# 2. launch the sweep
+databricks bundle run hpo_sweep -t dev
+```
+
+The sweep runs as a parent MLflow run with one nested child run per trial, sharing the same
+`Trainer` core as Step 7. It explores learning rates, `backbone_mode`
+(`frozen`/`lora`/`partial`/`full`), unfreeze depth, anchor geometry, and head
+regularization. All sweep parameters are config-driven from the `SWEEP_*` block in
+`notebooks/00_config.py`:
+
+| Config knob | Default | Drives |
+|-------------|---------|--------|
+| `SWEEP_STRATEGY` | `random` | `random` sampling or full `grid` |
+| `SWEEP_MAX_TRIALS` | `12` | trial budget |
+| `SWEEP_TRIAL_EPOCHS` | `3` | epochs per trial (short, for ranking) |
+| `SWEEP_PRIMARY_METRIC` | `val_map_50` | metric `select_best` ranks on |
+| `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` → `@candidate` |
+| `SWEEP_SEARCH_SPACE` | see config | per-knob value lists (incl. `backbone_mode`, `anchor_mode`) |
+
+Expected wall time: up to **8 hours** on `GPU_8xH100` (the job carries an 8-hour timeout).
+The winning trial is re-trained at full epochs, registered to UC, and aliased `@candidate`;
+the `deploy_endpoint` task then promotes it to `@champion` on a passing smoke test — so the
+sweep flows straight into the same deployment path as Step 7.
 
 ### Step 9 — Precompute embeddings (Phase 3)
 

@@ -47,6 +47,13 @@ ALLOWED_BACKBONES: tuple[str, ...] = (
     "dinov2_base",
 )
 
+# How much of the backbone is trainable:
+#   frozen  — backbone weights fixed (the historical default; head/FPN only).
+#   lora    — inject LoRA adapters into attention (cfg.lora_rank/alpha).
+#   full    — fine-tune the entire backbone end-to-end.
+#   partial — unfreeze only the last `backbone_trainable_blocks` transformer blocks.
+ALLOWED_BACKBONE_MODES: tuple[str, ...] = ("frozen", "lora", "full", "partial")
+
 
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
@@ -86,6 +93,25 @@ class TrainerConfig:
     # --- Detection -------------------------------------------------------
     # `num_classes=None` defers to `len(get_label_map())` at trainer build time.
     num_classes: int | None = None
+    # Anchor geometry. `None` defers to `detection_head.DEFAULT_ANCHOR_SCALES` /
+    # `DEFAULT_ASPECT_RATIOS` so existing runs are unchanged; set explicitly
+    # (e.g. from `calibrate_anchors`) to retarget anchors to the DENTEX box
+    # distribution. The values used are recorded in the manifest so serve/eval
+    # reconstruct the identical anchor set.
+    anchor_scales: list[int] | None = None
+    aspect_ratios: list[float] | None = None
+
+    # --- Backbone adaptation --------------------------------------------
+    # `backbone_mode` is the modern knob (frozen|lora|full|partial). `use_lora`
+    # is retained for back-compat: when it's True and `backbone_mode` is left at
+    # the "frozen" default, the effective mode resolves to "lora"
+    # (see `effective_backbone_mode`).
+    backbone_mode: str = "frozen"
+    # Discriminative LR for the (un)frozen backbone params. Much smaller than the
+    # head LR (`lr`) to avoid catastrophic forgetting during fine-tuning.
+    backbone_lr: float = 1e-5
+    # For `partial` mode: number of trailing transformer blocks to unfreeze.
+    backbone_trainable_blocks: int = 0
 
     # --- PEFT ------------------------------------------------------------
     use_lora: bool = False
@@ -131,6 +157,7 @@ class TrainerConfig:
             "img_size",
             "num_classes",
             "base_seed",
+            "backbone_trainable_blocks",
         }
     )
     _FLOAT_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -144,6 +171,7 @@ class TrainerConfig:
             "box_loss_weight",
             "lora_alpha",
             "barrier_timeout_seconds",
+            "backbone_lr",
         }
     )
     _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -182,6 +210,10 @@ class TrainerConfig:
                 cleaned[k] = float(v)
             elif k in cls._BOOL_FIELDS:
                 cleaned[k] = _coerce_bool(v)
+            elif k == "anchor_scales":
+                cleaned[k] = [int(x) for x in v]
+            elif k == "aspect_ratios":
+                cleaned[k] = [float(x) for x in v]
             else:
                 cleaned[k] = v
         # Backbone alias resolution.
@@ -292,6 +324,22 @@ class TrainerConfig:
             errs.append(f"lora_rank must be >= 1 when use_lora=True, got {self.lora_rank}")
         if self.use_lora and self.lora_alpha <= 0:
             errs.append(f"lora_alpha must be > 0 when use_lora=True, got {self.lora_alpha}")
+        if self.backbone_mode not in ALLOWED_BACKBONE_MODES:
+            errs.append(f"backbone_mode {self.backbone_mode!r} not in {ALLOWED_BACKBONE_MODES}")
+        if self.backbone_lr <= 0:
+            errs.append(f"backbone_lr must be > 0, got {self.backbone_lr}")
+        if self.backbone_trainable_blocks < 0:
+            errs.append(f"backbone_trainable_blocks must be >= 0, got {self.backbone_trainable_blocks}")
+        if self.backbone_mode == "partial" and self.backbone_trainable_blocks < 1:
+            errs.append("backbone_mode='partial' requires backbone_trainable_blocks >= 1")
+        if self.anchor_scales is not None and (
+            len(self.anchor_scales) == 0 or any(s <= 0 for s in self.anchor_scales)
+        ):
+            errs.append(f"anchor_scales must be a non-empty list of positive ints, got {self.anchor_scales}")
+        if self.aspect_ratios is not None and (
+            len(self.aspect_ratios) == 0 or any(r <= 0 for r in self.aspect_ratios)
+        ):
+            errs.append(f"aspect_ratios must be a non-empty list of positive floats, got {self.aspect_ratios}")
         if self.num_classes is not None and self.num_classes < 1:
             errs.append(f"num_classes must be >= 1 (or None to derive), got {self.num_classes}")
         if self.barrier_timeout_seconds <= 0:
@@ -306,6 +354,18 @@ class TrainerConfig:
         and tweak one or two fields without re-typing the whole thing.
         """
         return dataclasses.replace(self, **overrides)
+
+    def effective_backbone_mode(self) -> str:
+        """Resolve the backbone-adaptation mode, honoring the legacy `use_lora`.
+
+        `backbone_mode` is authoritative. The legacy `use_lora=True` flag maps
+        onto `"lora"` only when `backbone_mode` is still at its `"frozen"`
+        default, so old callers that set `use_lora=True` keep working while a
+        caller that explicitly sets `backbone_mode` wins.
+        """
+        if self.backbone_mode == "frozen" and self.use_lora:
+            return "lora"
+        return self.backbone_mode
 
 
 # Module-level so it's testable. Accepts the YAML scalar shapes plus

@@ -11,7 +11,7 @@
 # ---- Core UC config (edit here to switch environments) ----
 CATALOG = "mlops_pj"
 SCHEMA = "dais26_vfm"
-BACKBONE = "dinov3_vitl16"
+BACKBONE = "cradio_v4_so400m"
 BACKBONE_REVISION = "main"
 
 # Table-name prefix so multiple DAIS26 projects can share one schema without colliding.
@@ -103,7 +103,10 @@ HF_TOKEN: str | None = None         # set only if the DENTEX HF repo is gated
 EXPLORE_SPLIT = "train"             # train | val | test | drift_synthetic
 
 # 02_train_detector_air
-TRAIN_EPOCHS = 10
+# TEMP (sweep-derived): winner of hpo-sweep-cradio_v4_so400m is backbone_mode=frozen
+# (band 40-50); its val/best_mAP_50 was still setting new highs at the final epoch
+# (15) -> "still rising" -> pick the long end of the frozen band. >= SWEEP_TRIAL_EPOCHS.
+TRAIN_EPOCHS = 50
 TRAIN_LR = 1e-3
 TRAIN_BATCH_SIZE = 8
 TRAIN_USE_LORA = False
@@ -111,6 +114,31 @@ TRAIN_LORA_RANK = 8
 TRAIN_LORA_ALPHA = 32.0
 TRAIN_GPUS = 8                      # passed to @distributed
 TRAIN_GPU_TYPE = "h100"             # "h100" | "a10"
+
+# 02b_hpo_sweep
+# Sequential @distributed AIR trials, each a nested MLflow run under one parent.
+# Keep trials cheap (short epochs, small count) — the winner is retrained once at
+# TRAIN_EPOCHS and registered with @candidate. Each trial is a full 8xH100 job, so
+# the orchestrating job needs the 8h timeout (see resources/jobs + sgcli).
+SWEEP_STRATEGY = "random"            # "grid" | "random"
+SWEEP_MAX_TRIALS = 8
+SWEEP_TRIAL_EPOCHS = 25              # TEMP: ~25 epochs/trial for this sweep (was 15)
+SWEEP_SEED = 42
+SWEEP_PRIMARY_METRIC = "val/best_mAP_50"
+SWEEP_REGISTER_WINNER = True         # retrain the winning config full-length + register @candidate
+# Field name -> list of choices (TrainerConfig fields, except `anchor_mode` which
+# the driver resolves to anchor_scales: "calibrated" runs calibrate_anchors on the
+# train split, "default" leaves the module defaults). `backbone_mode` exercises the
+# new frozen/lora/full encoder-adaptation knob; backbone_lr stays at its 1e-5 default.
+SWEEP_SEARCH_SPACE: dict = {
+    "lr": [5e-4, 3e-4, 1e-4],
+    "onecycle_pct_start": [0.1, 0.3],
+    "box_loss_weight": [1.0, 1.5, 2.0],
+    "focal_gamma": [1.5, 2.0, 2.5],
+    "weight_decay": [1e-4, 1e-2],
+    "anchor_mode": ["default", "calibrated"],
+    "backbone_mode": ["frozen", "lora", "full"],
+}
 
 # 03_precompute_embeddings
 EMBEDDINGS_BATCH_SIZE = 32

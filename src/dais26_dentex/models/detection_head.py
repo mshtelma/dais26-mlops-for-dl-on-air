@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 from typing import ClassVar
@@ -219,6 +220,13 @@ class DetectionModel(nn.Module):
         self.nms_iou_threshold = nms_iou_threshold
         self.score_threshold = score_threshold
         self.max_detections = max_detections
+        # Whether the backbone participates in autograd. The builder sets the
+        # backbone's requires_grad (frozen / lora / partial / full) BEFORE
+        # constructing this model, so we can snapshot it once here. When the
+        # backbone is trainable, `forward_train` must NOT wrap it in
+        # torch.no_grad() or gradients never reach the encoder (the bug that
+        # silently no-op'd the old LoRA path).
+        self.backbone_frozen: bool = not any(p.requires_grad for p in backbone.parameters())
 
     def forward(self, images: torch.Tensor) -> dict[str, list[torch.Tensor]]:
         """Inference forward. images: (B, 3, H, W).
@@ -272,7 +280,10 @@ class DetectionModel(nn.Module):
         _, _, h, w = images.shape
         ph = h // self.patch_size
         pw = w // self.patch_size
-        with torch.no_grad():
+        # Only suppress backbone grads when the encoder is frozen; otherwise the
+        # encoder is being fine-tuned (full/partial/lora) and needs autograd.
+        backbone_ctx = torch.no_grad() if self.backbone_frozen else contextlib.nullcontext()
+        with backbone_ctx:
             _, spatial = self.backbone(images)
         fmap = self.fpn(spatial, spatial_shape=(ph, pw))
         cls_logits, box_reg = self.head(fmap)

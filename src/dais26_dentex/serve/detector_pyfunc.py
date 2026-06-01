@@ -115,13 +115,21 @@ def _build_detection_model(
     return model, info
 
 
-def _load_state_into(model: Any, state_path: str, device: str) -> None:
-    """Load the FPN+head state dict; backbone weights come from HF."""
+def _load_state_into(model: Any, state_path: str, device: str, *, keep_backbone: bool = False) -> None:
+    """Load the saved state dict into the model.
+
+    By default only FPN+head weights are restored and the backbone comes from
+    HF (frozen / merged-LoRA training). When ``keep_backbone`` is True (full or
+    partial backbone fine-tune) the persisted ``backbone.*`` weights are loaded
+    too — otherwise the served model would silently fall back to the pretrained
+    encoder and discard the fine-tune.
+    """
     state = torch.load(state_path, map_location=device, weights_only=True)
-    head_state = {k: v for k, v in state.items() if not k.startswith("backbone.")}
-    missing = model.load_state_dict(head_state, strict=False)
+    load_state = state if keep_backbone else {k: v for k, v in state.items() if not k.startswith("backbone.")}
+    missing = model.load_state_dict(load_state, strict=False)
     logger.info(
-        "Loaded head/FPN state. Missing: %s, Unexpected: %s",
+        "Loaded state (keep_backbone=%s). Missing: %s, Unexpected: %s",
+        keep_backbone,
         len(missing.missing_keys),
         len(missing.unexpected_keys),
     )
@@ -246,7 +254,10 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             max_detections=manifest.detector.max_detections,
             local_files_only=offline,
         )
-        _load_state_into(model, artifacts["model_state"], device)
+        # full/partial fine-tune persisted backbone weights in the state dict;
+        # restore them instead of keeping the pretrained HF encoder.
+        keep_backbone = manifest.backbone.trained_mode in ("full", "partial")
+        _load_state_into(model, artifacts["model_state"], device, keep_backbone=keep_backbone)
         model.eval()
         self.model = _maybe_compile(model, device)
         self.device = device

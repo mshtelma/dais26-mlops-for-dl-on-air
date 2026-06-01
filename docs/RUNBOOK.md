@@ -661,3 +661,28 @@ dispatches to `Trainer.run()`. Common failures:
 | `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `sgcli`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
 | Hyperparameters from yaml ignored | yaml top-level shape mismatch | The sgcli yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
 | `experiment_name` from yaml clashes with `EXPERIMENT_NAME` from `notebooks/00_config.py` | Both surfaces define their own naming — intentional | Keep them independent; they target different runs (sgcli vs. notebook) |
+
+### Hyperparameter sweep + backbone fine-tuning {#hpo-sweep}
+
+The `hpo_sweep` job (`notebooks/02b_hpo_sweep.py`) tunes the detector head and
+fine-tunes the C-RADIO / DINOv3 backbone. It is config-driven from the `SWEEP_*`
+block in `notebooks/00_config.py` and shares the `Trainer` core with the single-run
+path, so anything below applies to both `train_detector` and `hpo_sweep`.
+
+Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in
+`SWEEP_SEARCH_SPACE`, the sgcli yaml, or `00_config.py`):
+
+| Knob | Values | Effect |
+|------|--------|--------|
+| `backbone_mode` | `frozen` (default) / `lora` / `partial` / `full` | how much of the encoder receives gradients; resolved via `cfg.effective_backbone_mode()` (legacy `use_lora=True` still maps to `lora`) |
+| `backbone_trainable_blocks` | int ≥ 1 | for `partial`: how many trailing transformer blocks `peft.unfreeze_last_blocks` unfreezes |
+| `backbone_lr` | float > 0 | discriminative LR for the backbone param group (head/FPN keep `lr`); both feed a multi-`max_lr` `OneCycleLR` |
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Sweep / fine-tune run OOMs on the H100 pool | `backbone_mode=full` doubles activations vs frozen | Drop to `partial` with a small `backbone_trainable_blocks`, or lower `batch_size` in the trial space |
+| Loss diverges immediately when fine-tuning the backbone | `backbone_lr` too high → catastrophic forgetting of the VFM | Keep `backbone_lr` ≈ 1e-5 (10–100× below the head `lr`); the discriminative param groups exist for exactly this |
+| DDP `find_unused_parameters` error | `backbone_mode=full` expects every param to get a grad | Trainer sets `find_unused_parameters=False` only for `full`; for `frozen`/`lora`/`partial` it stays `True` |
+| Fine-tuned weights don't survive serving | backbone weights stripped at load for frozen/LoRA artifacts | The manifest records `backbone.trained_mode`; `detector_pyfunc` keeps the full backbone state only when it is `full`/`partial`. Re-train so the manifest is written by current code |
+| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `hpo_sweep` (and `train_detector`) carry an 8-hour timeout (`timeout_seconds: 28800`); sgcli workloads use `timeout_minutes: 480` |
+| Anchor changes have no effect | `anchor_scales`/`aspect_ratios` left unset | `build_detector` only overrides the FPN defaults when both are set; the sweep's `anchor_mode` maps presets onto these fields |

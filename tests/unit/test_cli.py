@@ -1,21 +1,40 @@
-"""Tests for `dais26_dentex.train.cli` — the YAML → TrainerConfig → train_detector dispatch.
+"""Tests for `dais26_dentex.train.cli` — the YAML → TrainerConfig → Trainer dispatch.
 
 The old `_coerce / _INT_KEYS / filter_to_known_kwargs` helpers moved onto
 `TrainerConfig.from_dict` (covered in `test_trainer_config.py`); these tests
 exercise the cli surface only — argument parsing, env var handling, and the
-end-to-end dispatch into `train_detector`.
+end-to-end dispatch into `Trainer(cfg).run()`.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
 import yaml
 
 from dais26_dentex.train import cli
+
+
+class _FakeTrainer:
+    """Captures the `cfg` passed to `Trainer(cfg)` and returns a canned run_id.
+
+    Set `_FakeTrainer.run_id` / `_FakeTrainer.captured` per test. Mirrors the
+    real `Trainer(cfg).run()` seam now that cli builds the trainer directly
+    instead of round-tripping through `train_detector`.
+    """
+
+    run_id: ClassVar[str | None] = "fake_run_id"
+    captured: ClassVar[dict[str, object]] = {}
+
+    def __init__(self, cfg: object) -> None:
+        type(self).captured = {"cfg": cfg}
+
+    def run(self) -> str | None:
+        return type(self).run_id
 
 # --- _resolve_yaml_path --------------------------------------------------
 
@@ -78,11 +97,14 @@ def test_main_dry_run_does_not_invoke_trainer(tmp_path: Path, monkeypatch: pytes
 
     called = {"yes": False}
 
-    def trainer_should_not_be_called(**_: object) -> str:
-        called["yes"] = True
-        return "should_not_happen"
+    class _ShouldNotRun:
+        def __init__(self, cfg: object) -> None:
+            called["yes"] = True
 
-    monkeypatch.setattr(cli, "train_detector", trainer_should_not_be_called)
+        def run(self) -> str:
+            return "should_not_happen"
+
+    monkeypatch.setattr(cli, "Trainer", _ShouldNotRun)
     rc = cli.main(["--config", str(path), "--dry-run"])
     assert rc == 0
     assert called["yes"] is False
@@ -91,8 +113,14 @@ def test_main_dry_run_does_not_invoke_trainer(tmp_path: Path, monkeypatch: pytes
 # --- main: end-to-end dispatch ------------------------------------------
 
 
-def test_main_dispatches_to_train_detector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """HYPERPARAMETERS_PATH → TrainerConfig → train_detector(**cfg)."""
+def test_main_dispatches_to_trainer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYPERPARAMETERS_PATH → TrainerConfig → Trainer(cfg).run().
+
+    The cli builds the trainer from the fully-typed cfg, so the loss/optimizer
+    knobs that the old `to_kwargs_for_train_detector` subset dropped now reach
+    the Trainer. We assert the cfg carries both legacy and previously-dropped
+    knobs.
+    """
     path = tmp_path / "p.yaml"
     path.write_text(
         yaml.safe_dump(
@@ -102,25 +130,26 @@ def test_main_dispatches_to_train_detector(tmp_path: Path, monkeypatch: pytest.M
                 "epochs": "3",  # string — must be coerced to int
                 "use_lora": "false",
                 "backbone_name": "nvidia/C-RADIOv4-SO400M",
+                "box_loss_weight": "2.0",  # previously dropped by the legacy subset
+                "backbone_mode": "full",
                 "noise_key": "ignored",  # must be filtered out
             }
         )
     )
-    captured: dict[str, object] = {}
 
-    def fake_train_detector(**kwargs: object) -> str:
-        captured.update(kwargs)
-        return "fake_run_id"
-
+    _FakeTrainer.run_id = "fake_run_id"
     monkeypatch.setenv("HYPERPARAMETERS_PATH", str(path))
-    monkeypatch.setattr(cli, "train_detector", fake_train_detector)
+    monkeypatch.setattr(cli, "Trainer", _FakeTrainer)
     rc = cli.main([])
     assert rc == 0
-    assert captured["catalog"] == "c"
-    assert captured["epochs"] == 3
-    assert captured["use_lora"] is False
-    assert captured["backbone_name"] == "cradio_v4_so400m"
-    assert "noise_key" not in captured
+    cfg = _FakeTrainer.captured["cfg"]
+    assert cfg.catalog == "c"
+    assert cfg.epochs == 3
+    assert cfg.use_lora is False
+    assert cfg.backbone_name == "cradio_v4_so400m"
+    assert cfg.box_loss_weight == 2.0
+    assert cfg.backbone_mode == "full"
+    assert not hasattr(cfg, "noise_key")
 
 
 def test_main_validates_before_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,11 +167,14 @@ def test_main_validates_before_dispatch(tmp_path: Path, monkeypatch: pytest.Monk
     )
     called = {"yes": False}
 
-    def trainer_should_not_be_called(**_: object) -> str:
-        called["yes"] = True
-        return ""
+    class _ShouldNotRun:
+        def __init__(self, cfg: object) -> None:
+            called["yes"] = True
 
-    monkeypatch.setattr(cli, "train_detector", trainer_should_not_be_called)
+        def run(self) -> str:
+            return ""
+
+    monkeypatch.setattr(cli, "Trainer", _ShouldNotRun)
     with pytest.raises(ValueError, match="epochs"):
         cli.main(["--config", str(path)])
     assert called["yes"] is False
@@ -156,7 +188,8 @@ def test_main_prints_model_uri_on_success(
     path = tmp_path / "p.yaml"
     path.write_text(yaml.safe_dump({"catalog": "c", "schema": "s"}))
 
-    monkeypatch.setattr(cli, "train_detector", lambda **_: "abc123")
+    _FakeTrainer.run_id = "abc123"
+    monkeypatch.setattr(cli, "Trainer", _FakeTrainer)
     monkeypatch.setattr(cli, "is_rank0", lambda: True)
     rc = cli.main(["--config", str(path)])
     assert rc == 0
@@ -173,7 +206,8 @@ def test_main_does_not_print_uri_on_non_rank0(
     path = tmp_path / "p.yaml"
     path.write_text(yaml.safe_dump({"catalog": "c", "schema": "s"}))
 
-    monkeypatch.setattr(cli, "train_detector", lambda **_: "abc123")
+    _FakeTrainer.run_id = "abc123"
+    monkeypatch.setattr(cli, "Trainer", _FakeTrainer)
     monkeypatch.setattr(cli, "is_rank0", lambda: False)
     rc = cli.main(["--config", str(path)])
     assert rc == 0

@@ -376,3 +376,93 @@ def test_to_dict_contains_all_fields() -> None:
     cfg = TrainerConfig(catalog="c", schema="s")
     d = cfg.to_dict()
     assert {f.name for f in dataclasses.fields(cfg)} == set(d.keys())
+
+
+# --- anchor + backbone-mode knobs ---------------------------------------
+
+
+def test_new_knob_defaults() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s")
+    assert cfg.anchor_scales is None
+    assert cfg.aspect_ratios is None
+    assert cfg.backbone_mode == "frozen"
+    assert cfg.backbone_lr == pytest.approx(1e-5)
+    assert cfg.backbone_trainable_blocks == 0
+
+
+def test_from_dict_coerces_anchor_lists_and_backbone_fields() -> None:
+    cfg = TrainerConfig.from_dict(
+        {
+            "catalog": "c",
+            "schema": "s",
+            "anchor_scales": ["16", "32", 64],  # mixed str/int -> ints
+            "aspect_ratios": ["0.5", 1, "2.0"],  # -> floats
+            "backbone_mode": "partial",
+            "backbone_lr": "2e-5",
+            "backbone_trainable_blocks": "4",
+        }
+    )
+    assert cfg.anchor_scales == [16, 32, 64]
+    assert all(isinstance(s, int) for s in cfg.anchor_scales)
+    assert cfg.aspect_ratios == [0.5, 1.0, 2.0]
+    assert all(isinstance(r, float) for r in cfg.aspect_ratios)
+    assert cfg.backbone_mode == "partial"
+    assert cfg.backbone_lr == pytest.approx(2e-5)
+    assert cfg.backbone_trainable_blocks == 4
+
+
+def test_validate_rejects_unknown_backbone_mode() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", backbone_mode="turbo")
+    with pytest.raises(ValueError, match="backbone_mode"):
+        cfg.validate()
+
+
+def test_validate_rejects_nonpositive_backbone_lr() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", backbone_lr=0.0)
+    with pytest.raises(ValueError, match="backbone_lr"):
+        cfg.validate()
+
+
+def test_validate_partial_requires_trainable_blocks() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", backbone_mode="partial", backbone_trainable_blocks=0)
+    with pytest.raises(ValueError, match="partial"):
+        cfg.validate()
+    # With >=1 blocks it passes.
+    TrainerConfig(catalog="c", schema="s", backbone_mode="partial", backbone_trainable_blocks=2).validate()
+
+
+def test_validate_rejects_bad_anchor_lists() -> None:
+    with pytest.raises(ValueError, match="anchor_scales"):
+        TrainerConfig(catalog="c", schema="s", anchor_scales=[]).validate()
+    with pytest.raises(ValueError, match="anchor_scales"):
+        TrainerConfig(catalog="c", schema="s", anchor_scales=[16, -1]).validate()
+    with pytest.raises(ValueError, match="aspect_ratios"):
+        TrainerConfig(catalog="c", schema="s", aspect_ratios=[0.0, 1.0]).validate()
+
+
+def test_validate_accepts_valid_anchor_lists() -> None:
+    TrainerConfig(
+        catalog="c", schema="s", anchor_scales=[16, 32, 64, 128], aspect_ratios=[0.5, 1.0, 2.0]
+    ).validate()
+
+
+def test_effective_backbone_mode_maps_legacy_use_lora() -> None:
+    # Legacy: use_lora=True with default frozen mode resolves to "lora".
+    cfg = TrainerConfig(catalog="c", schema="s", use_lora=True)
+    assert cfg.effective_backbone_mode() == "lora"
+    # Explicit backbone_mode wins over use_lora.
+    cfg2 = TrainerConfig(catalog="c", schema="s", use_lora=True, backbone_mode="full")
+    assert cfg2.effective_backbone_mode() == "full"
+    # Plain default stays frozen.
+    assert TrainerConfig(catalog="c", schema="s").effective_backbone_mode() == "frozen"
+
+
+def test_to_mlflow_params_stringifies_new_knobs() -> None:
+    cfg = TrainerConfig(
+        catalog="c", schema="s", anchor_scales=[16, 32], backbone_mode="full", backbone_lr=1e-5
+    )
+    params = cfg.to_mlflow_params()
+    assert params["anchor_scales"] == "[16, 32]"
+    assert params["aspect_ratios"] == ""  # None -> ""
+    assert params["backbone_mode"] == "full"
+    assert params["backbone_lr"] == str(1e-5)

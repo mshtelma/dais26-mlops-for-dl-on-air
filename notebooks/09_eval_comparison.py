@@ -73,6 +73,21 @@ COMPARE_BACKBONES: dict[str, dict[str, str]] = {
 LABEL_MAP = get_label_map()  # {0: "Caries", ...}
 NAME_TO_ID = {v: k for k, v in LABEL_MAP.items()}
 
+
+def _to_category_id(name: object) -> int:
+    """Map a predicted class *name* -> integer category_id.
+
+    The pyfunc returns class names (e.g. "Caries"); COCO scoring wants the
+    integer id. Fall back to int() only for the (defensive) case of a numeric
+    label — done as an explicit branch, NOT a dict-get default, since the
+    default expression `int(name)` would be evaluated eagerly even for known
+    names and raise on "Caries".
+    """
+    key = str(name)
+    if key in NAME_TO_ID:
+        return NAME_TO_ID[key]
+    return int(key)
+
 print(f"EVAL_SPLIT = {EVAL_SPLIT}")
 print(f"Catalog/schema = {CATALOG}.{SCHEMA}")
 
@@ -135,7 +150,7 @@ def _predict_split(model) -> list[dict]:
         df_in = pd.DataFrame({"image": [_b64(p) for _, p in chunk]})
         preds = model.predict(df_in).reset_index(drop=True)
         for (image_id, _), (_, row) in zip(chunk, preds.iterrows(), strict=True):
-            labels = [NAME_TO_ID.get(str(name), int(name)) for name in row["labels"]]
+            labels = [_to_category_id(name) for name in row["labels"]]
             model_output.append(
                 {
                     "image_id": int(image_id),

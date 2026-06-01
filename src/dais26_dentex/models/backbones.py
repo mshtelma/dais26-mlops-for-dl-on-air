@@ -138,11 +138,19 @@ def load_backbone(
     cache_dir: str | None = None,
     device: str = "cuda",
     local_files_only: bool = False,
+    freeze: bool = True,
 ) -> tuple[nn.Module, BackboneInfo]:
     """Load a vision backbone, return wrapped model + dimension info.
 
     cache_dir is honored via HF_HOME env override (so HF caches go to UC Volume).
-    Returned backbone is frozen (requires_grad_=False) and in eval() mode.
+
+    By default the backbone is frozen (``requires_grad_=False``) and in
+    ``eval()`` mode — the historical head-only training path. Pass
+    ``freeze=False`` to fine-tune the whole encoder: weights keep
+    ``requires_grad=True`` and the module is left in ``train()`` mode so dropout
+    / stochastic-depth behave correctly. Partial unfreezing (last-N blocks) is
+    layered on top by the caller (``builder.build_detector`` ->
+    ``peft.unfreeze_last_blocks``) starting from a frozen load.
 
     local_files_only forces a strictly-offline load from the cache (set at
     serving time, where the HF cache is bundled into the model artifact and the
@@ -206,7 +214,13 @@ def load_backbone(
     else:
         raise ValueError(f"Unknown backbone: {name}")
 
-    wrapped.requires_grad_(False)
-    wrapped.eval()
+    if freeze:
+        wrapped.requires_grad_(False)
+        wrapped.eval()
+    else:
+        # Full fine-tune: keep grads on and stay in train() mode so dropout /
+        # stochastic depth in the encoder behave as during pretraining.
+        wrapped.requires_grad_(True)
+        wrapped.train()
     wrapped.to(device)
     return wrapped, info

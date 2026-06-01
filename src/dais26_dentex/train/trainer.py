@@ -24,6 +24,7 @@ on `self`.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import tempfile
 from pathlib import Path
@@ -106,14 +107,37 @@ class Trainer:
     def _build_model(self) -> tuple[nn.Module, Any]:
         model, info = build_detector(self.cfg, device=self.device)
         if is_distributed():
+            # When the entire backbone is trainable (full fine-tune) every param
+            # gets a grad, so `find_unused_parameters` can drop to False for
+            # speed. Frozen / lora / partial keep the configured value because a
+            # subtree is non-trainable.
+            find_unused = self.cfg.ddp_find_unused and self.cfg.effective_backbone_mode() != "full"
             model = nn.parallel.DistributedDataParallel(
                 model,
                 device_ids=[self.device.index] if self.device.type == "cuda" else None,
                 output_device=self.device.index if self.device.type == "cuda" else None,
-                find_unused_parameters=self.cfg.ddp_find_unused,
+                find_unused_parameters=find_unused,
                 broadcast_buffers=False,
             )
         return model, info
+
+    @staticmethod
+    def _split_param_groups(
+        model: nn.Module,
+    ) -> tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
+        """Split trainable params into (backbone, head/FPN) groups by name.
+
+        DDP prefixes names with ``module.``; the backbone subtree is the only
+        one whose qualified name contains ``backbone``, so a substring test is
+        robust to the wrap. Frozen params are excluded.
+        """
+        backbone_params: list[torch.nn.Parameter] = []
+        head_params: list[torch.nn.Parameter] = []
+        for name, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (backbone_params if "backbone" in name else head_params).append(p)
+        return backbone_params, head_params
 
     def _build_loaders(
         self,
@@ -259,6 +283,19 @@ class Trainer:
             logger.warning("Val GT not found at %s; skipping mAP.", gt_path)
             return {}
 
+        # The val transform (`get_val_transforms`) does a uniform longest-side
+        # resize to `img_size` + bottom-right zero-pad, so the model emits boxes
+        # in that padded `img_size` coordinate space. COCO GT in `val.json` is
+        # in ORIGINAL image pixel coords, so predictions must be rescaled back by
+        # `max(H, W) / img_size` per image before eval — otherwise IoU(pred, gt)
+        # ~= 0 and every mAP is pinned at 0.0 even as train loss drops.
+        with open(gt_path) as f:
+            gt_coco = json.load(f)
+        scale_by_id = {
+            int(im["id"]): max(float(im["width"]), float(im["height"])) / float(cfg.img_size)
+            for im in gt_coco.get("images", [])
+        }
+
         preds: list[dict[str, Any]] = []
         for images, targets in loader:
             images = images.to(self.device, non_blocking=True)
@@ -268,10 +305,12 @@ class Trainer:
             ):
                 out = bare(images)
             for i, t in enumerate(targets):
+                image_id = int(t["image_id"].item()) if hasattr(t["image_id"], "item") else int(t["image_id"])
+                factor = scale_by_id.get(image_id, 1.0)
                 preds.append(
                     {
-                        "image_id": int(t["image_id"].item()) if hasattr(t["image_id"], "item") else int(t["image_id"]),
-                        "boxes": out["boxes"][i].cpu(),
+                        "image_id": image_id,
+                        "boxes": out["boxes"][i].cpu() * factor,
                         "scores": out["scores"][i].cpu(),
                         "labels": out["labels"][i].cpu(),
                     }
@@ -292,6 +331,12 @@ class Trainer:
     def _build_manifest(self, info: Any) -> Manifest:
         """Compose the v2 ``Manifest`` from this run's config + backbone info."""
         cfg = self.cfg
+        # Record the anchor geometry ACTUALLY used (cfg overrides → defaults),
+        # not the module defaults — otherwise tuned anchors won't be
+        # reconstructed at serve/eval time and box decoding mismatches the GT.
+        scales = cfg.anchor_scales if cfg.anchor_scales is not None else list(DEFAULT_ANCHOR_SCALES)
+        aspect_ratios = cfg.aspect_ratios if cfg.aspect_ratios is not None else list(DEFAULT_ASPECT_RATIOS)
+        mode = cfg.effective_backbone_mode()
         return Manifest(
             backbone=BackboneSpec(
                 name=cfg.backbone_name,
@@ -299,11 +344,12 @@ class Trainer:
                 summary_dim=info.summary_dim,
                 spatial_dim=info.spatial_dim,
                 patch_size=info.patch_size,
+                trained_mode=mode,
             ),
             detector=DetectorSpec(
                 num_classes=self.num_classes,
-                scales=list(DEFAULT_ANCHOR_SCALES),
-                aspect_ratios=list(DEFAULT_ASPECT_RATIOS),
+                scales=list(scales),
+                aspect_ratios=list(aspect_ratios),
                 input_size=cfg.img_size,
             ),
             label_map={str(k): v for k, v in get_label_map().items()},
@@ -311,9 +357,11 @@ class Trainer:
             trainer={
                 "epochs": cfg.epochs,
                 "lr": cfg.lr,
+                "backbone_lr": cfg.backbone_lr,
                 "weight_decay": cfg.weight_decay,
                 "batch_size": cfg.batch_size,
                 "img_size": cfg.img_size,
+                "backbone_mode": mode,
                 "best_epoch": self._best_epoch,
                 "best_val_mAP_50": self._best_metric,
             },
@@ -381,11 +429,30 @@ class Trainer:
         model, info = self._build_model()
         train_loader, val_loader, train_sampler = self._build_loaders()
 
-        trainable = [p for p in model.parameters() if p.requires_grad]
+        backbone_params, head_params = self._split_param_groups(model)
+        trainable = head_params + backbone_params
         n_trainable = sum(p.numel() for p in trainable)
-        logger.info("Trainable params: %d", n_trainable)
+        logger.info(
+            "Trainable params: %d (head/FPN=%d, backbone=%d, mode=%s)",
+            n_trainable,
+            sum(p.numel() for p in head_params),
+            sum(p.numel() for p in backbone_params),
+            cfg.effective_backbone_mode(),
+        )
 
-        optimizer = torch.optim.AdamW(trainable, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        # Discriminative LRs: head/FPN at cfg.lr, backbone at the much smaller
+        # cfg.backbone_lr so fine-tuning doesn't wipe pretrained features. The
+        # OneCycle max_lr list must line up with the param-group order below.
+        param_groups: list[dict[str, Any]] = []
+        max_lrs: list[float] = []
+        if head_params:
+            param_groups.append({"params": head_params, "lr": cfg.lr})
+            max_lrs.append(cfg.lr)
+        if backbone_params:
+            param_groups.append({"params": backbone_params, "lr": cfg.backbone_lr})
+            max_lrs.append(cfg.backbone_lr)
+        optimizer = torch.optim.AdamW(param_groups, lr=cfg.lr, weight_decay=cfg.weight_decay)
+        self._onecycle_max_lr: list[float] = max_lrs
         scaler = torch.amp.GradScaler("cuda", enabled=(self.device.type == "cuda"))
 
         mlflow_ctx = mlflow.start_run() if is_rank0() else contextlib.nullcontext()
@@ -411,7 +478,7 @@ class Trainer:
                     steps_per_epoch = max(len(train_loader), 1)
                     scheduler = torch.optim.lr_scheduler.OneCycleLR(
                         optimizer,
-                        max_lr=cfg.lr,
+                        max_lr=self._onecycle_max_lr,
                         epochs=cfg.epochs,
                         steps_per_epoch=steps_per_epoch,
                         pct_start=cfg.onecycle_pct_start,
