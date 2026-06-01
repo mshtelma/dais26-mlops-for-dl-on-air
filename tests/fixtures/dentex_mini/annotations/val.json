@@ -1,0 +1,16 @@
+{
+  "info": {"description": "DENTEX mini fixture val", "version": "1.0"},
+  "licenses": [],
+  "categories": [
+    {"id": 0, "name": "Caries", "supercategory": "tooth"},
+    {"id": 1, "name": "Deep Caries", "supercategory": "tooth"},
+    {"id": 2, "name": "Periapical Lesion", "supercategory": "tooth"},
+    {"id": 3, "name": "Impacted", "supercategory": "tooth"}
+  ],
+  "images": [
+    {"id": 3, "file_name": "img_0003.png", "width": 16, "height": 16}
+  ],
+  "annotations": [
+    {"id": 4, "image_id": 3, "category_id": 1, "bbox": [3, 3, 7, 7], "area": 49, "iscrowd": 0}
+  ]
+}

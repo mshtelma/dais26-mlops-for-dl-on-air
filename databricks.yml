@@ -1,0 +1,39 @@
+bundle:
+  name: dais26-vfm
+
+variables:
+  sp_app_id:
+    description: "Service principal application ID (UUID) for prod run_as. Created via 'databricks service-principals create --display-name dais26-vfm-sp'. Required for prod target."
+    default: ""
+
+artifacts:
+  dais26_vfm_wheel:
+    type: whl
+    build: "uv build"
+    path: "."
+
+include:
+  - "resources/jobs/*.yml"
+  - "resources/experiments/*.yml"
+  # NOTE: resources/serving/*.yml is intentionally NOT included.
+  # Serving endpoints are deployed via SDK in the deploy_endpoint task after training,
+  # gated on @candidate alias being set on a registered model version.
+
+# All training, embedding, and drift jobs run on Databricks AI Runtime (AIR) /
+# Serverless GPU Compute. No traditional ML clusters are defined anywhere in
+# the bundle. The training notebook uses `@distributed` from `serverless_gpu`
+# to dispatch GPU work; an alternative terminal-driven launch lives in
+# `sgcli/workload_train_detector.yaml`.
+#
+# Shared config (catalog / schema / backbone / backbone_revision / table names)
+# lives in `notebooks/00_config.py`. Edit that notebook to switch environments.
+
+targets:
+  dev:
+    mode: development
+    default: true
+
+  prod:
+    mode: production
+    run_as:
+      service_principal_name: "${var.sp_app_id}"

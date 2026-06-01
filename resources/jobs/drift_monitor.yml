@@ -1,0 +1,30 @@
+resources:
+  jobs:
+    drift_monitor:
+      name: "dais26_drift_monitor_${bundle.target}"
+      description: "Compute embedding drift on recent detector inference traffic vs training reference. AIR-only via serverless notebook task."
+      tags:
+        - key: "project"
+          value: "dais26-vfm"
+        - key: "component"
+          value: "monitoring"
+      schedule:
+        quartz_cron_expression: "0 0 * * * ?"
+        timezone_id: "UTC"
+        pause_status: "PAUSED"                  # unpause manually post-demo
+      max_retries: 0
+      timeout_seconds: 1800
+
+      # NO job_clusters block — AIR-only. Serverless notebook task.
+      #
+      # All notebook config (catalog / schema / backbone / DRIFT_MODE / knn_k /
+      # alert_threshold / detector_inference_table) lives in notebooks/00_config.py
+      # and is pulled in via `%run ./00_config`. To use this as a scheduled monitor,
+      # set DRIFT_MODE = "scheduled" in 00_config.py.
+
+      tasks:
+        - task_key: "compute_drift"
+          notebook_task:
+            notebook_path: "../../notebooks/05_drift_demo.py"
+          libraries:
+            - whl: "../../dist/*.whl"
