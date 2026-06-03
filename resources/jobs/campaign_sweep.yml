@@ -1,0 +1,64 @@
+resources:
+  jobs:
+    campaign_sweep:
+      name: "dais26_campaign_sweep_${bundle.target}"
+      description: >-
+        "Push to 0.60" tuning campaign driver. One parametrized job that runs any
+        stage of the DINOv3 / C-RADIO campaigns (CAMPAIGN_STAGES in
+        notebooks/00_config.py) via the 02b sweep harness. Set the `sweep_stage`
+        parameter (e.g. dinov3_s1, dinov3_s2, ... cradio_s4); stages s1-s3 measure
+        the full-length winner for gating, s4 registers @candidate. Run stages in
+        order, updating each stage's pinned values to the prior stage's MLflow
+        winner before launching. See docs/HPO.md "Push to 0.60".
+      tags:
+        project: "dais26-vfm"
+        component: "training"
+      # A stage runs SWEEP_MAX_TRIALS sequential ~30-40-epoch 8xH100 trials plus a
+      # full-length retrain of the winner (up to 100 epochs); @distributed inherits
+      # this job timeout. 48h covers the widest stage.
+      timeout_seconds: 172800
+      queue:
+        enabled: true
+      # Allow several stages to run at once (e.g. C-RADIO 150ep + C-RADIO s2 +
+      # DINOv3 focal_alpha); each grabs its own 8xH100, so they only serialize if
+      # the GPU pool is full.
+      max_concurrent_runs: 3
+      performance_target: PERFORMANCE_OPTIMIZED
+
+      # `sweep_stage` is read as a notebook widget by 02b_hpo_sweep.py. Override at
+      # launch: `databricks bundle run campaign_sweep -- --params sweep_stage=dinov3_s1`
+      # (or set it in the Jobs UI run dialog).
+      parameters:
+        - name: "sweep_stage"
+          default: "dinov3_s1"
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/00_setup.py"
+          environment_key: "default"
+          max_retries: 1
+
+        - task_key: "sweep"
+          depends_on:
+            - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/02b_hpo_sweep.py"
+            base_parameters:
+              sweep_stage: "{{job.parameters.sweep_stage}}"
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_8xH100
+          max_retries: 1

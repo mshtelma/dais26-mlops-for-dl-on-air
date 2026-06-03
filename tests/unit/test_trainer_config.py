@@ -466,3 +466,146 @@ def test_to_mlflow_params_stringifies_new_knobs() -> None:
     assert params["aspect_ratios"] == ""  # None -> ""
     assert params["backbone_mode"] == "full"
     assert params["backbone_lr"] == str(1e-5)
+
+
+# --- anchor-layout + NMS knobs ------------------------------------------
+
+
+def test_anchor_layout_knob_defaults() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s")
+    assert cfg.anchor_layout == "absolute"
+    assert cfg.anchor_base_scale == pytest.approx(4.0)
+    assert cfg.anchor_octaves is None
+    assert cfg.nms_per_class is False
+
+
+def test_from_dict_coerces_anchor_layout_knobs() -> None:
+    cfg = TrainerConfig.from_dict(
+        {
+            "catalog": "c",
+            "schema": "s",
+            "anchor_layout": "per_level",
+            "anchor_base_scale": "4.0",
+            "anchor_octaves": ["1", "1.26", 1.587],  # -> floats
+            "nms_per_class": "true",
+        }
+    )
+    assert cfg.anchor_layout == "per_level"
+    assert cfg.anchor_base_scale == pytest.approx(4.0)
+    assert cfg.anchor_octaves == [1.0, 1.26, 1.587]
+    assert all(isinstance(o, float) for o in cfg.anchor_octaves)
+    assert cfg.nms_per_class is True
+
+
+def test_validate_rejects_bad_anchor_layout() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", anchor_layout="pyramid")
+    with pytest.raises(ValueError, match="anchor_layout"):
+        cfg.validate()
+
+
+def test_validate_rejects_nonpositive_anchor_base_scale() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", anchor_base_scale=0.0)
+    with pytest.raises(ValueError, match="anchor_base_scale"):
+        cfg.validate()
+
+
+def test_validate_rejects_bad_anchor_octaves() -> None:
+    with pytest.raises(ValueError, match="anchor_octaves"):
+        TrainerConfig(catalog="c", schema="s", anchor_octaves=[]).validate()
+    with pytest.raises(ValueError, match="anchor_octaves"):
+        TrainerConfig(catalog="c", schema="s", anchor_octaves=[1.0, -0.5]).validate()
+
+
+def test_validate_accepts_valid_per_level_config() -> None:
+    TrainerConfig(
+        catalog="c",
+        schema="s",
+        anchor_layout="per_level",
+        anchor_base_scale=4.0,
+        anchor_octaves=[1.0, 1.26, 1.587],
+        nms_per_class=True,
+    ).validate()
+
+
+# --- eval-time thresholds + grad-accum + augmentation knobs (push-to-0.60) ---
+
+
+def test_threshold_and_aug_knob_defaults_are_legacy() -> None:
+    """Defaults must reproduce the legacy behavior (no behavior change for
+    existing runs)."""
+    cfg = TrainerConfig(catalog="c", schema="s")
+    assert cfg.score_threshold == pytest.approx(0.05)
+    assert cfg.nms_iou_threshold == pytest.approx(0.5)
+    assert cfg.max_detections == 100
+    assert cfg.grad_accum_steps == 1
+    assert cfg.aug_hflip_prob == pytest.approx(0.5)
+    assert cfg.aug_jitter_prob == pytest.approx(0.5)
+    assert cfg.aug_jitter_scale == pytest.approx(1.0)
+    assert cfg.aug_rotation_deg == pytest.approx(0.0)
+    assert cfg.aug_multiscale_range is None
+
+
+def test_from_dict_coerces_threshold_aug_and_grad_accum() -> None:
+    cfg = TrainerConfig.from_dict(
+        {
+            "catalog": "c",
+            "schema": "s",
+            "score_threshold": "0.01",
+            "nms_iou_threshold": "0.6",
+            "max_detections": "200",
+            "grad_accum_steps": "4",
+            "aug_rotation_deg": "7",
+            "aug_jitter_scale": "1.5",
+            "aug_multiscale_range": ["0.8", 1.0],  # -> floats
+        }
+    )
+    assert cfg.score_threshold == pytest.approx(0.01)
+    assert cfg.nms_iou_threshold == pytest.approx(0.6)
+    assert cfg.max_detections == 200
+    assert isinstance(cfg.max_detections, int)
+    assert cfg.grad_accum_steps == 4
+    assert cfg.aug_rotation_deg == pytest.approx(7.0)
+    assert cfg.aug_jitter_scale == pytest.approx(1.5)
+    assert cfg.aug_multiscale_range == [0.8, 1.0]
+    assert all(isinstance(x, float) for x in cfg.aug_multiscale_range)
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"score_threshold": 1.0}, "score_threshold"),
+        ({"score_threshold": -0.1}, "score_threshold"),
+        ({"nms_iou_threshold": 0.0}, "nms_iou_threshold"),
+        ({"nms_iou_threshold": 1.5}, "nms_iou_threshold"),
+        ({"max_detections": 0}, "max_detections"),
+        ({"grad_accum_steps": 0}, "grad_accum_steps"),
+        ({"aug_hflip_prob": 1.5}, "aug_hflip_prob"),
+        ({"aug_jitter_prob": -0.1}, "aug_jitter_prob"),
+        ({"aug_jitter_scale": -1.0}, "aug_jitter_scale"),
+        ({"aug_rotation_deg": -5.0}, "aug_rotation_deg"),
+        ({"aug_multiscale_range": [1.0]}, "aug_multiscale_range"),
+        ({"aug_multiscale_range": [0.9, 0.8]}, "aug_multiscale_range"),
+        ({"aug_multiscale_range": [0.0, 1.0]}, "aug_multiscale_range"),
+        ({"aug_multiscale_range": [0.5, 1.2]}, "aug_multiscale_range"),
+    ],
+)
+def test_validate_rejects_bad_threshold_aug_values(kwargs: dict, match: str) -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", **kwargs)
+    with pytest.raises(ValueError, match=match):
+        cfg.validate()
+
+
+def test_validate_accepts_valid_threshold_aug_config() -> None:
+    TrainerConfig(
+        catalog="c",
+        schema="s",
+        score_threshold=0.01,
+        nms_iou_threshold=0.6,
+        max_detections=300,
+        grad_accum_steps=4,
+        aug_hflip_prob=0.5,
+        aug_jitter_prob=0.5,
+        aug_jitter_scale=1.5,
+        aug_rotation_deg=7.0,
+        aug_multiscale_range=[0.7, 1.0],
+    ).validate()

@@ -108,6 +108,13 @@ def build_detector(
         scales=scales,
         aspect_ratios=aspect_ratios,
         patch_size=info.patch_size,
+        nms_iou_threshold=cfg.nms_iou_threshold,
+        score_threshold=cfg.score_threshold,
+        max_detections=cfg.max_detections,
+        anchor_layout=cfg.anchor_layout,
+        anchor_base_scale=cfg.anchor_base_scale,
+        anchor_octaves=cfg.anchor_octaves,
+        nms_per_class=cfg.nms_per_class,
     ).to(device)
 
     return model, info

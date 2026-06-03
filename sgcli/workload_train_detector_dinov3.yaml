@@ -61,12 +61,26 @@ parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
   cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache    # CACHE_DIR
   epochs: 10                       # TRAIN_EPOCHS
   lr: 0.001                        # TRAIN_LR
-  batch_size: 8                    # TRAIN_BATCH_SIZE
+  # DINOv3 is autocast-unstable (fp16 -> flat-loss collapse; bf16 -> nan forward),
+  # so it trains in fp32 (amp_dtype below). fp32 activations are ~2x bf16, which
+  # already used ~68% of an 80GB H100 at batch 8 — halve the batch to avoid OOM.
+  batch_size: 4                    # was 8; fp32 memory headroom (see amp_dtype)
+  # Precision: fp32 (autocast disabled). "auto" also resolves DINOv3 -> fp32, but
+  # pin it explicitly here so the sgcli launch is unambiguous. See docs/HPO.md.
+  amp_dtype: fp32
   num_workers: 4                   # train_detector default; no notebook override
   use_lora: false                  # TRAIN_USE_LORA
   lora_rank: 8                     # TRAIN_LORA_RANK
   lora_alpha: 32.0                 # TRAIN_LORA_ALPHA
   img_size: 1024                   # train_detector default; no notebook override
+  # Anchor geometry + NMS (the proposed detection-head fix). Defaulted to the
+  # `per_level` treatment so an sgcli launch reproduces the post-fix recipe;
+  # the controlled A/B that justifies these values lives in
+  # notebooks/02c_anchor_ab.py (see docs/HPO.md "DINOv3 A/B"). Set
+  # anchor_layout: absolute + nms_per_class: false to reproduce the legacy model.
+  anchor_layout: per_level         # stride-scaled RetinaNet anchors (was absolute)
+  anchor_base_scale: 4.0           # per-level base = stride x base_scale
+  nms_per_class: true              # per-class batched_nms (co-located lesion/tooth)
   model_name: dinov3_detector      # DETECTOR_MODEL_SHORT (dinov3 backbone, use_lora=false branch)
   register_model: true
   set_candidate_alias: true

@@ -1,23 +1,32 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import torch
 import torch.nn as nn
+
+from dais26_dentex.data.transforms import CLIP_MEAN, CLIP_STD, IMAGENET_MEAN, IMAGENET_STD
 
 BackboneName = Literal["cradio_v4_so400m", "dinov3_vitl16", "dinov2_base"]
 
 
 @dataclass(frozen=True)
 class BackboneInfo:
-    """Single source of truth for backbone output dimensions.
+    """Single source of truth for backbone output dimensions + preprocessing.
 
     Different backbones return different output structures:
     - C-RADIOv4: tuple (summary, spatial_features), summary_dim != spatial_dim
     - DINOv2: single tensor (B, T, D) where summary is just the CLS token at index 0; summary_dim == spatial_dim
     Downstream consumers (FPN, embedder, drift, VS index) must parameterize on these dims.
+
+    ``image_mean``/``image_std`` are the input normalisation stats the backbone
+    was pretrained with: CLIP for C-RADIO, ImageNet for DINOv2/DINOv3. Training,
+    eval, and serving must all use the SAME stats — feeding CLIP-normalised
+    inputs to DINOv3 makes them OOD and caps mAP (see docs/HPO.md "DINOv3 A/B").
+    Defaults to CLIP so legacy constructors (and pre-existing manifests) are
+    unchanged.
     """
 
     name: str
@@ -26,6 +35,8 @@ class BackboneInfo:
     patch_size: int  # C-RADIOv4: 16; DINOv2-base: 14
     model_name: str  # HuggingFace ID or torch.hub identifier
     revision: str | None  # Pinned commit SHA (None for torch.hub)
+    image_mean: list[float] = field(default_factory=lambda: list(CLIP_MEAN))
+    image_std: list[float] = field(default_factory=lambda: list(CLIP_STD))
 
 
 def _assert_cradio_runtime_deps() -> None:
@@ -179,6 +190,8 @@ def load_backbone(
             patch_size=16,
             model_name="nvidia/C-RADIOv4-SO400M",
             revision=revision,
+            image_mean=list(CLIP_MEAN),
+            image_std=list(CLIP_STD),
         )
     elif name == "dinov3_vitl16":
         from transformers import AutoModel
@@ -199,6 +212,8 @@ def load_backbone(
             patch_size=16,
             model_name="facebook/dinov3-vitl16-pretrain-lvd1689m",
             revision=revision,
+            image_mean=list(IMAGENET_MEAN),  # HF DINOv3ViTImageProcessor default
+            image_std=list(IMAGENET_STD),
         )
     elif name == "dinov2_base":
         model = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14", trust_repo=True)
@@ -210,6 +225,8 @@ def load_backbone(
             patch_size=14,
             model_name="facebookresearch/dinov2/dinov2_vitb14",
             revision=None,
+            image_mean=list(IMAGENET_MEAN),  # DINOv2 also pretrained with ImageNet stats
+            image_std=list(IMAGENET_STD),
         )
     else:
         raise ValueError(f"Unknown backbone: {name}")

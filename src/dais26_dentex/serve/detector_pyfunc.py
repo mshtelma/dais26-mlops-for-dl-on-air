@@ -57,14 +57,25 @@ def _decode_b64_image(
     """
     raw = base64.b64decode(b64_str)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
-    orig_size = (img.height, img.width)
-    img = img.resize((input_size, input_size))
-    arr = np.array(img, dtype=np.float32) / 255.0
+    orig_h, orig_w = img.height, img.width
+    # Letterbox to match training (`data.transforms._resize_and_pad`): longest-side
+    # resize preserving aspect ratio, then zero-pad the bottom-right to a square.
+    # The previous anisotropic `resize((input_size, input_size))` squash did NOT
+    # match the training pipeline and silently wrecked served mAP on non-square
+    # images (DENTEX panoramics are ~2:1) — the model saw a horizontally stretched
+    # image and boxes were mapped back with the wrong per-axis factors.
+    scale = input_size / max(orig_h, orig_w)
+    new_h = round(orig_h * scale)
+    new_w = round(orig_w * scale)
+    img = img.resize((new_w, new_h))  # PIL takes (width, height)
+    resized = np.array(img, dtype=np.float32) / 255.0  # (new_h, new_w, 3)
+    arr = np.zeros((input_size, input_size, 3), dtype=np.float32)
+    arr[:new_h, :new_w, :] = resized
     mean_a = np.array(mean, dtype=np.float32).reshape(3, 1, 1)
     std_a = np.array(std, dtype=np.float32).reshape(3, 1, 1)
     arr = arr.transpose(2, 0, 1)  # HWC → CHW
     arr = (arr - mean_a) / std_a
-    return torch.from_numpy(arr), orig_size
+    return torch.from_numpy(arr), (orig_h, orig_w)
 
 
 def _build_detection_model(
@@ -80,6 +91,10 @@ def _build_detection_model(
     score_threshold: float,
     max_detections: int,
     local_files_only: bool = False,
+    anchor_layout: str = "absolute",
+    anchor_base_scale: float = 4.0,
+    anchor_octaves: list[float] | None = None,
+    nms_per_class: bool = False,
 ) -> tuple[Any, Any]:
     """Build a `DetectionModel` and return ``(model, info)``.
 
@@ -111,6 +126,10 @@ def _build_detection_model(
         nms_iou_threshold=nms_iou_threshold,
         score_threshold=score_threshold,
         max_detections=max_detections,
+        anchor_layout=anchor_layout,
+        anchor_base_scale=anchor_base_scale,
+        anchor_octaves=anchor_octaves,
+        nms_per_class=nms_per_class,
     ).to(device)
     return model, info
 
@@ -178,11 +197,15 @@ def _predict_batch(
         boxes_t = out["boxes"][0].cpu()
         scores_t = out["scores"][0].cpu()
         labels_t = out["labels"][0].cpu()
-        sx = orig[1] / input_size
-        sy = orig[0] / input_size
-        scaled = boxes_t.clone()
-        scaled[:, [0, 2]] *= sx
-        scaled[:, [1, 3]] *= sy
+        # Invert the letterbox with a single uniform scale (NOT per-axis): the
+        # forward transform preserved aspect ratio and padded the bottom-right,
+        # so 1024px-frame boxes map back by `max(orig)/input_size`, then clip to
+        # the original image bounds.
+        orig_h, orig_w = orig
+        inv_scale = max(orig_h, orig_w) / input_size
+        scaled = boxes_t.clone() * inv_scale
+        scaled[:, [0, 2]] = scaled[:, [0, 2]].clamp(0, orig_w)
+        scaled[:, [1, 3]] = scaled[:, [1, 3]].clamp(0, orig_h)
         rows.append(
             {
                 "boxes": scaled.tolist(),
@@ -232,6 +255,12 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
 
         self.label_map: dict[int, str] = {int(k): v for k, v in manifest.label_map.items()}
         self.input_size: int = manifest.detector.input_size
+        # Normalise with the stats the model trained with (recorded in the
+        # manifest). Falls back to the BackboneSpec CLIP default for pre-v.next
+        # manifests. Using the wrong stats (e.g. CLIP for a DINOv3 model) feeds
+        # the encoder OOD inputs and silently tanks served mAP.
+        self.norm_mean: list[float] = list(manifest.backbone.image_mean)
+        self.norm_std: list[float] = list(manifest.backbone.image_std)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
@@ -253,6 +282,10 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             score_threshold=manifest.detector.score_threshold,
             max_detections=manifest.detector.max_detections,
             local_files_only=offline,
+            anchor_layout=manifest.detector.anchor_layout,
+            anchor_base_scale=manifest.detector.anchor_base_scale,
+            anchor_octaves=manifest.detector.anchor_octaves,
+            nms_per_class=manifest.detector.nms_per_class,
         )
         # full/partial fine-tune persisted backbone weights in the state dict;
         # restore them instead of keeping the pretrained HF encoder.
@@ -279,8 +312,8 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             device=self.device,
             label_map=self.label_map,
             input_size=self.input_size,
-            mean=self.CLIP_MEAN,
-            std=self.CLIP_STD,
+            mean=self.norm_mean,
+            std=self.norm_std,
             model_input=model_input,
         )
 

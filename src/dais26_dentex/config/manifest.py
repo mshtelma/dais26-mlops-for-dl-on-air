@@ -33,6 +33,13 @@ from typing import Any
 
 from dais26_dentex.config.constants import ARTIFACT_FORMAT_VERSION
 
+# CLIP normalisation stats — the default for pre-existing manifests written
+# before `image_mean/std` were recorded (every such artifact was C-RADIO, which
+# uses CLIP norm). Duplicated here (not imported from data.transforms) so the
+# lightweight config package doesn't pull in torch/torchvision at import time.
+_DEFAULT_IMAGE_MEAN = [0.48145466, 0.4578275, 0.40821073]
+_DEFAULT_IMAGE_STD = [0.26862954, 0.26130258, 0.27577711]
+
 
 class IncompatibleArtifactError(ValueError):
     """Raised when a manifest's ``version`` is not the one we can load.
@@ -63,6 +70,12 @@ class BackboneSpec:
     # the saved state dict (full/partial) instead of re-fetching the pretrained
     # encoder from HF. Defaults to "frozen" so pre-existing manifests load.
     trained_mode: str = "frozen"
+    # Input normalisation stats the model was trained with (CLIP for C-RADIO,
+    # ImageNet for DINOv2/v3). Serving MUST normalise with these exact values or
+    # the encoder sees OOD inputs. Defaults to CLIP so pre-v.next manifests
+    # (all C-RADIO) keep reproducing their training-time preprocessing.
+    image_mean: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_MEAN))
+    image_std: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_STD))
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +87,14 @@ class DetectorSpec:
     nms_iou_threshold: float = 0.5
     max_detections: int = 100
     input_size: int = 1024
+    # Anchor layout + NMS mode. Defaulted so pre-existing v2 manifests (written
+    # before these knobs) still load and reproduce the legacy absolute-layout,
+    # class-agnostic-NMS model. `anchor_octaves=None` defers to the module
+    # default octave set when rebuilding the AnchorGenerator at serve/eval time.
+    anchor_layout: str = "absolute"
+    anchor_base_scale: float = 4.0
+    anchor_octaves: list[float] | None = None
+    nms_per_class: bool = False
 
 
 @dataclass(frozen=True, slots=True)

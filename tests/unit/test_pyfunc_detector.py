@@ -145,6 +145,54 @@ def test_detector_missing_image_column(detector_artifacts):
         pyfunc.predict(ctx, pd.DataFrame({"foo": ["bar"]}))
 
 
+def test_letterbox_decode_and_inverse_roundtrip():
+    """Serving preprocessing must match training (`transforms._resize_and_pad`):
+    aspect-preserving longest-side resize + bottom-right zero-pad, and the box
+    inverse must be a single uniform scale. The old anisotropic squash + per-axis
+    inverse silently wrecked served mAP on non-square images; this guards it.
+    """
+    from dais26_dentex.serve.detector_pyfunc import _decode_b64_image, _predict_batch
+
+    # Wide non-square image: 200 wide x 100 tall (DENTEX panoramics are ~2:1).
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 100), (255, 0, 0)).save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    input_size = 64
+    mean = [0.0, 0.0, 0.0]
+    std = [1.0, 1.0, 1.0]
+    tensor, orig = _decode_b64_image(b64, input_size, mean, std)
+
+    assert orig == (100, 200)  # (H, W)
+    assert tuple(tensor.shape) == (3, input_size, input_size)
+    # Longest side 200 -> 64, so content is 64w x 32h in the top-left; the
+    # bottom 32 rows are zero-pad (would be a full square under the old squash).
+    assert torch.allclose(tensor[:, 32:, :], torch.zeros(3, 32, input_size))
+    assert tensor[:, :32, :].abs().sum() > 0
+
+    # A prediction covering the full content box [0,0,64,32] must map back to the
+    # full original image [0,0,200,100]. The old per-axis inverse would have
+    # produced [0,0,200,50] (half height) — this asserts the uniform inverse.
+    class _FixedModel(nn.Module):
+        def forward(self, batch):  # noqa: D401 — minimal stub
+            return {
+                "boxes": [torch.tensor([[0.0, 0.0, 64.0, 32.0]])],
+                "scores": [torch.tensor([0.9])],
+                "labels": [torch.tensor([0])],
+            }
+
+    out = _predict_batch(
+        model=_FixedModel(),
+        device="cpu",
+        label_map={0: "Caries"},
+        input_size=input_size,
+        mean=mean,
+        std=std,
+        model_input=pd.DataFrame({"image": [b64]}),
+    )
+    assert out.iloc[0]["boxes"][0] == pytest.approx([0.0, 0.0, 200.0, 100.0], abs=1e-3)
+
+
 def test_build_signature_and_example():
     from dais26_dentex.serve.detector_pyfunc import build_signature_and_example
 

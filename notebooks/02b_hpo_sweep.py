@@ -16,8 +16,9 @@
 # MAGIC 1. (optional) calibrate anchors once on the driver from the train split.
 # MAGIC 2. start a parent run; for each trial build a `TrainerConfig` (00_config defaults
 # MAGIC    + trial override), train with `register_model=False`, tag the run as nested.
-# MAGIC 3. pick the winner by `SWEEP_PRIMARY_METRIC`; retrain it at `TRAIN_EPOCHS` with
-# MAGIC    `register_model=True` + `@candidate` (only the winner is registered).
+# MAGIC 3. pick the winner by `SWEEP_PRIMARY_METRIC`; retrain it at both `TRAIN_EPOCHS`
+# MAGIC    and `TRAIN_EPOCHS_LONG` with `register_model=True`, then point `@candidate`
+# MAGIC    at whichever schedule scored higher (only the winner config is registered).
 # MAGIC
 # MAGIC Requires the orchestrating job to carry the 8h timeout (see `resources/jobs`).
 
@@ -47,6 +48,50 @@ except Exception:
 model_name = DETECTOR_MODEL_SHORT
 os.environ["MLFLOW_EXPERIMENT_NAME"] = EXPERIMENT_NAME
 client = MlflowClient()
+
+# ---- Resolve the active campaign stage (the "push to 0.60" chain) ----
+# When SWEEP_STAGE names a stage in CAMPAIGN_STAGES (00_config), override the
+# legacy SWEEP_* globals with that stage's backbone / pinned recipe / search
+# space / schedule / register-flag. Leaving SWEEP_STAGE=None preserves the
+# original post-fix-sweep behavior. See docs/HPO.md "Push to 0.60".
+#
+# A `sweep_stage` job parameter / notebook widget overrides the 00_config value,
+# so the one campaign_sweep job (resources/jobs/campaign_sweep.yml) can launch
+# any stage by name (e.g. dinov3_s1) without editing 00_config.
+try:
+    dbutils.widgets.text("sweep_stage", "")
+    _stage_param = dbutils.widgets.get("sweep_stage").strip()
+    if _stage_param:
+        SWEEP_STAGE = _stage_param
+except Exception:
+    pass
+
+SCHEDULE_EPOCHS: list[int] = [TRAIN_EPOCHS, TRAIN_EPOCHS_LONG]
+_REGISTER_WINNER: bool = SWEEP_REGISTER_WINNER
+if SWEEP_STAGE and SWEEP_STAGE not in CAMPAIGN_STAGES:
+    raise ValueError(
+        f"SWEEP_STAGE={SWEEP_STAGE!r} not in CAMPAIGN_STAGES "
+        f"({sorted(CAMPAIGN_STAGES)}). Set it to None for the legacy sweep."
+    )
+_stage = CAMPAIGN_STAGES.get(SWEEP_STAGE) if SWEEP_STAGE else None
+if _stage is not None:
+    BACKBONE = _stage["backbone"]
+    model_name = _DETECTOR_NAMES_BY_BACKBONE[BACKBONE]["model_short"]
+    SWEEP_PINNED = _stage["pinned"]
+    SWEEP_SEARCH_SPACE = _stage["search_space"]
+    SWEEP_TRIAL_EPOCHS = _stage["trial_epochs"]
+    SWEEP_MAX_TRIALS = _stage.get("max_trials", SWEEP_MAX_TRIALS)
+    SCHEDULE_EPOCHS = list(_stage["schedule_epochs"])
+    _REGISTER_WINNER = bool(_stage.get("register_winner", True))
+    print(
+        f"Campaign stage '{SWEEP_STAGE}': backbone={BACKBONE} model={model_name} "
+        f"trial_epochs={SWEEP_TRIAL_EPOCHS} max_trials={SWEEP_MAX_TRIALS} "
+        f"schedule={SCHEDULE_EPOCHS} register_winner={_REGISTER_WINNER}"
+    )
+    print(f"  pinned       = {SWEEP_PINNED}")
+    print(f"  search_space = {SWEEP_SEARCH_SPACE}")
+else:
+    print("No SWEEP_STAGE set — using legacy SWEEP_* constants from 00_config.")
 
 # COMMAND ----------
 # ---- Optional: calibrate anchors once on the driver (for the "calibrated" toggle) ----
@@ -81,7 +126,10 @@ def _resolve_overrides(params: dict) -> dict:
 
 # COMMAND ----------
 def _train_config_kwargs(override: dict, *, epochs: int, register: bool) -> dict:
-    """Base TrainerConfig kwargs (00_config defaults) merged with a trial override."""
+    """Base TrainerConfig kwargs (00_config defaults + SWEEP_PINNED) merged with a
+    trial override. SWEEP_PINNED carries the knobs held fixed across the sweep
+    (full fine-tune, per-level anchors, per-class NMS, etc.); the trial override
+    (swept fields) wins on any collision, though by design they do not overlap."""
     base = dict(
         catalog=CATALOG,
         schema=SCHEMA,
@@ -96,7 +144,7 @@ def _train_config_kwargs(override: dict, *, epochs: int, register: bool) -> dict
         register_model=register,
         set_candidate_alias=register,
     )
-    return {**base, **override}
+    return {**base, **SWEEP_PINNED, **override}
 
 
 def _run_distributed_training(cfg_kwargs: dict) -> str | None:
@@ -179,12 +227,53 @@ with mlflow.start_run(run_name=f"hpo-sweep-{BACKBONE}") as parent:
         print(f"\nWinner: trial {best.trial_id} ({SWEEP_PRIMARY_METRIC}={best.metric}) params={best.params}")
 
 # COMMAND ----------
-# ---- Retrain the winner at full length and register @candidate (only the winner) ----
-if best is not None and SWEEP_REGISTER_WINNER:
-    print(f"Retraining winner at {TRAIN_EPOCHS} epochs and registering as {model_name}...")
-    winner_kwargs = _train_config_kwargs(best.params, epochs=TRAIN_EPOCHS, register=True)
-    winner_run_id = _run_distributed_training(winner_kwargs)
-    print(f"Winner registered. run_id={winner_run_id}")
-    dbutils.jobs.taskValues.set(key="run_id", value=winner_run_id)
+# ---- Retrain the winner; confirm the schedule (TRAIN_EPOCHS vs TRAIN_EPOCHS_LONG) ----
+# The per-level anchor fix reshapes the matcher/loss landscape, so the prior ~e40
+# saturation point may move. Retrain the winning config at both the short and long
+# schedules and keep whichever scores higher on SWEEP_PRIMARY_METRIC. Both runs
+# register a UC version (the Trainer sets @candidate to itself and logs the version
+# as the `registered_version` param); after both finish we move @candidate onto the
+# better run's version. The Trainer tracks the best checkpoint, so a 100-epoch run
+# that peaks early still registers its peak rather than an over-trained final epoch.
+# Retrain when registering (legacy + finalize stages) OR when a measure-only
+# stage is active (s1-s3 need the full-length metric for their gate).
+_DO_RETRAIN = best is not None and (_REGISTER_WINNER or _stage is not None)
+if _DO_RETRAIN:
+    full_model = f"{CATALOG}.{SCHEMA}.{model_name}"
+
+    def _retrain_winner(epochs: int, register: bool) -> tuple[str | None, float | None, str | None]:
+        verb = "registering as" if register else "measuring (no register)"
+        print(f"Retraining winner at {epochs} epochs, {verb} {full_model}...")
+        kwargs = _train_config_kwargs(best.params, epochs=epochs, register=register)
+        rid = _run_distributed_training(kwargs)
+        metric = version = None
+        if rid:
+            run_data = client.get_run(rid).data
+            metric = run_data.metrics.get(SWEEP_PRIMARY_METRIC)
+            version = run_data.params.get("registered_version")
+        print(f"  epochs={epochs}: run_id={rid} {SWEEP_PRIMARY_METRIC}={metric} version={version}")
+        return rid, metric, version
+
+    # Retrain the winner at every schedule in SCHEDULE_EPOCHS (the stage's
+    # schedule arm, or [TRAIN_EPOCHS, TRAIN_EPOCHS_LONG] for the legacy sweep).
+    # Stages s1-s3 set register_winner=False — they retrain only to MEASURE the
+    # full-length metric for gating; only the finalize stage (s4) registers.
+    schedule_runs = [_retrain_winner(ep, _REGISTER_WINNER) for ep in SCHEDULE_EPOCHS]
+    # Pick the better schedule by the primary metric (None-safe: trained-with-metric
+    # beats no-metric, then higher metric wins).
+    winner_rid, winner_metric, winner_version = max(
+        schedule_runs, key=lambda rmv: (rmv[1] is not None, rmv[1] or -1.0)
+    )
+    print(f"\nBest full-length retrain: run {winner_rid} {SWEEP_PRIMARY_METRIC}={winner_metric}")
+    if _REGISTER_WINNER and winner_version is not None:
+        # Each registering retrain set @candidate to itself, so the alias points
+        # at the last-trained schedule; re-point it at the better run's version.
+        client.set_registered_model_alias(full_model, "candidate", winner_version)
+        print(f"@candidate -> version {winner_version} (run {winner_rid})")
+    elif _REGISTER_WINNER:
+        print(f"No registered_version on the winning run ({winner_rid}); alias left as-is.")
+    else:
+        print("Stage register_winner=False — measured full-length metric only; @candidate unchanged.")
+    dbutils.jobs.taskValues.set(key="run_id", value=winner_rid)
 else:
     dbutils.jobs.taskValues.set(key="run_id", value=(best.run_id if best else None))

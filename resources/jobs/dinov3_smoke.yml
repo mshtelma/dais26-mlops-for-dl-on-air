@@ -1,0 +1,47 @@
+resources:
+  jobs:
+    # TEMP: one-off DINOv3 precision/normalization smoke test
+    # (notebooks/02d_dinov3_smoke.py). Cheap go/no-go before the full A/B —
+    # delete once the fix is validated and the A/B (02c) is re-run.
+    dinov3_smoke:
+      name: "dais26_dinov3_smoke_${bundle.target}"
+      description: "TEMP: short DINOv3 fine-tune to confirm the bf16 + ImageNet-norm fix makes train/loss decrease and val/mAP_50 > 0 (was flat/0.0 under fp16+CLIP). See notebooks/02d_dinov3_smoke.py + docs/HPO.md."
+      tags:
+        project: "dais26-vfm"
+        component: "training"
+        temp: "dinov3-smoke"
+      # 2h: 3-epoch single 8xH100 fine-tune. Generous headroom for the gated
+      # DINOv3 download on a cold cache.
+      timeout_seconds: 7200
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/00_setup.py"
+          environment_key: "default"
+          max_retries: 1
+
+        - task_key: "dinov3_smoke"
+          depends_on:
+            - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/02d_dinov3_smoke.py"
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_8xH100
+          max_retries: 1

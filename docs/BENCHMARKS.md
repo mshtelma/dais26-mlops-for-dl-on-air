@@ -46,15 +46,28 @@ Target: full 10-epoch frozen training completes in ≤20 minutes on a single H10
 
 Target: frozen-backbone [email protected] on DENTEX val set ≥ 0.45.
 
+Per-class AP@50 is produced by `eval.coco_metrics.evaluate_coco` (`per_class_AP50`)
+and surfaced by `notebooks/09_eval_comparison.py` / `09b_eval_threshold_grid.py`.
+The "push to 0.60" campaign rows track the per-level + resolution/schedule/anchor/
+augmentation tuning (see [HPO.md](HPO.md#push-to-060--two-sequential-single-model-campaigns)).
+
 | Model | Backbone | mAP@50 | mAP@50:95 | Caries AP@50 | Deep Caries AP@50 | Periapical AP@50 | Impacted AP@50 |
 |-------|----------|--------|-----------|-------------|------------------|-----------------|---------------|
 | Frozen head | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
 | LoRA rank=8 (STRETCH) | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
+| Per-level (baseline) | C-RADIOv4-SO400M | 0.5219 | TBD | 0.2102 (09b) | TBD | TBD | TBD |
+| Per-level (baseline) | DINOv3-ViTL16 | 0.5181 | 0.285 | TBD (broken reg.) | TBD | TBD | TBD |
+| Campaign best (`useful-mare-854`, 1024/100ep+aug) | C-RADIOv4-SO400M | 0.5648 | 0.291 | TBD (re-eval) | TBD | TBD | TBD |
+| Campaign best (`victorious-goose-410`, 1280+aug) | DINOv3-ViTL16 | 0.5355 | 0.316 | TBD (re-eval) | TBD | TBD | TBD |
+| Campaign candidate | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
+| Campaign candidate | DINOv3-ViTL16 | TBD | TBD | TBD | TBD | TBD | TBD |
 
 Acceptance thresholds:
 - mAP@50 ≥ 0.45 (frozen, MUST-SHIP)
 - mAP@50 ≥ 0.55 (LoRA, STRETCH)
 - Caries AP@50 ≥ 0.30 (anchor calibration validation, per C5b protocol)
+- **mAP@50 ≥ 0.58 AND Caries AP@50 ≥ 0.30 — per-backbone gate for the 0.60 campaign**
+  (finalize stage `<backbone>_detector@candidate`; target 0.60)
 
 ---
 

@@ -195,6 +195,61 @@ def test_load_non_object_root_raises(tmp_path: Path) -> None:
         load_manifest(path)
 
 
+def test_manifest_roundtrip_preserves_anchor_layout(tmp_path: Path) -> None:
+    """A per_level + per-class-NMS manifest round-trips the new anchor fields so
+    serve/eval rebuild the identical AnchorGenerator."""
+    src = Manifest(
+        backbone=BackboneSpec(
+            name="cradio_v4_so400m", revision="abc", summary_dim=1152, spatial_dim=1152, patch_size=16
+        ),
+        detector=DetectorSpec(
+            num_classes=4,
+            scales=[32, 64, 128, 256],
+            aspect_ratios=[0.5, 1.0, 2.0],
+            anchor_layout="per_level",
+            anchor_base_scale=4.0,
+            anchor_octaves=[1.0, 1.26, 1.587],
+            nms_per_class=True,
+        ),
+        label_map={"0": "Caries"},
+        trainer={},
+    )
+    path = tmp_path / "manifest.json"
+    src.write(path)
+    loaded = load_manifest(path)
+    assert loaded.detector == src.detector
+    assert loaded.detector.anchor_layout == "per_level"
+    assert loaded.detector.anchor_octaves == [1.0, 1.26, 1.587]
+    assert loaded.detector.nms_per_class is True
+
+
+def test_load_legacy_manifest_defaults_anchor_layout(tmp_path: Path) -> None:
+    """A manifest written before the anchor knobs loads with absolute / class-
+    agnostic defaults so old artifacts reproduce their original behavior."""
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": ARTIFACT_FORMAT_VERSION,
+                "backbone": {
+                    "name": "x",
+                    "revision": None,
+                    "summary_dim": 1,
+                    "spatial_dim": 1,
+                    "patch_size": 1,
+                },
+                "detector": {"num_classes": 4, "scales": [32], "aspect_ratios": [1.0]},
+                "label_map": {},
+            }
+        )
+    )
+    loaded = load_manifest(path)
+    assert loaded.detector.anchor_layout == "absolute"
+    assert loaded.detector.anchor_base_scale == 4.0
+    assert loaded.detector.anchor_octaves is None
+    assert loaded.detector.nms_per_class is False
+
+
 def test_detector_spec_defaults_match_postprocess() -> None:
     """`DetectorSpec` defaults must match `PostprocessConfig` defaults so an
     artifact missing optional fields still loads with the legacy behavior."""

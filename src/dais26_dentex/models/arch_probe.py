@@ -143,17 +143,27 @@ def level_anchor_report(
     scales: list[int],
     aspect_ratios: list[float],
     grid_shapes: dict[str, tuple[int, int]],
+    *,
+    layout: str = "absolute",
+    anchors_per_cell: int | None = None,
 ) -> dict[str, Any]:
     """Per-level anchor counts + the over-generation flag.
 
+    ``layout`` is the :class:`AnchorGenerator` layout. In ``absolute`` mode the
+    same scale list lands on every level (the over-generation smell); in
+    ``per_level`` mode each level is sized by its stride so the smell is gone.
+    ``anchors_per_cell`` overrides the count (the generator computes it from
+    octaves x ratios in per_level mode); when omitted it falls back to the
+    legacy ``len(scales) * len(aspect_ratios)``.
+
     Returns ``{levels: {p3: {grid, anchors, stride}, ...}, anchors_per_cell,
-    total_anchors, all_scales_every_level}``.
+    total_anchors, all_scales_every_level, layout}``.
     """
-    anchors_per_cell = len(scales) * len(aspect_ratios)
+    apc = anchors_per_cell if anchors_per_cell is not None else len(scales) * len(aspect_ratios)
     levels: dict[str, dict[str, Any]] = {}
     total = 0
     for key, (h, w) in grid_shapes.items():
-        n = h * w * anchors_per_cell
+        n = h * w * apc
         total += n
         levels[key] = {
             "grid": (h, w),
@@ -162,10 +172,12 @@ def level_anchor_report(
         }
     return {
         "levels": levels,
-        "anchors_per_cell": anchors_per_cell,
+        "anchors_per_cell": apc,
         "total_anchors": total,
-        # The smell: the same full scale list lands on every level.
-        "all_scales_every_level": len(scales) > 1 and len(grid_shapes) > 1,
+        # The smell only exists in the legacy absolute layout: the same full
+        # scale list lands on every level. Resolved by the per_level layout.
+        "all_scales_every_level": layout == "absolute" and len(scales) > 1 and len(grid_shapes) > 1,
+        "layout": layout,
         "scales": list(scales),
         "aspect_ratios": list(aspect_ratios),
     }
@@ -234,7 +246,14 @@ def probe_detection_model(
     anchors = model.anchor_gen(fmap)
 
     grid_shapes = _grid_shapes(fmap)
-    anchor_rep = level_anchor_report(model.anchor_gen.scales, model.anchor_gen.aspect_ratios, grid_shapes)
+    ag = model.anchor_gen
+    anchor_rep = level_anchor_report(
+        ag.scales,
+        ag.aspect_ratios,
+        grid_shapes,
+        layout=getattr(ag, "layout", "absolute"),
+        anchors_per_cell=getattr(ag, "num_anchors_per_cell", None),
+    )
 
     _cls_t, box_t, fg_mask, _ignore = build_targets_for_batch(
         anchors.to(device), [{k: v.to(device) for k, v in t.items()} for t in targets], num_classes
@@ -253,7 +272,11 @@ def probe_detection_model(
         "positives_per_level": positive_level_distribution(grid_shapes, anchor_rep["anchors_per_cell"], fg_mask),
         "positive_fraction": (total_positives / max(anchors.shape[0] * images.shape[0], 1)),
         "delta_overflow_fraction": delta_overflow_fraction(box_t, fg_mask, clamp=decode_clamp),
-        "nms_mode": "class-agnostic (single nms across all classes)",
+        "nms_mode": (
+            "per-class (torchvision.batched_nms keyed by label)"
+            if getattr(model, "nms_per_class", False)
+            else "class-agnostic (single nms across all classes)"
+        ),
     }
 
 

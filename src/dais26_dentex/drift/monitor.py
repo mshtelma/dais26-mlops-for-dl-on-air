@@ -98,6 +98,8 @@ def run_drift_monitor(
     k: int = 50,
     alert_threshold: float = 2.0,
     lookback_hours: int = 1,
+    image_mean: list[float] | None = None,
+    image_std: list[float] | None = None,
 ) -> dict[str, Any]:
     """Production drift monitor.
 
@@ -132,7 +134,9 @@ def run_drift_monitor(
             "timestamp": datetime.now(UTC).isoformat(),
         }
 
-    incoming = compute_embeddings(backbone, images)
+    # Re-embed with the same normalisation the reference embeddings used
+    # (CLIP for C-RADIO, ImageNet for DINOv2/v3). Defaults to CLIP when unset.
+    incoming = compute_embeddings(backbone, images, image_mean=image_mean, image_std=image_std)
     ref_df = spark.table(f"{catalog}.{schema}.{reference_table}").select("embedding").toPandas()
     ref_arr = np.stack(ref_df["embedding"].apply(np.asarray).to_list()).astype(np.float32)
     reference = fit_reference(ref_arr, method="knn", k=k)

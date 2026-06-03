@@ -1,0 +1,54 @@
+resources:
+  jobs:
+    # TEMP: one-off job to run the DINOv3 anchor-fix A/B (notebooks/02c_anchor_ab.py).
+    # Delete once the A/B numbers are recorded in docs/HPO.md ("DINOv3 A/B").
+    anchor_ab_dinov3:
+      name: "dais26_anchor_ab_dinov3_${bundle.target}"
+      description: "TEMP: controlled DINOv3 anchor-fix A/B — Arm A (absolute, class-agnostic NMS) vs Arm B (per_level, per-class NMS). Real-backbone probe + two @distributed 8xH100 arms, register_model=False. See notebooks/02c_anchor_ab.py + docs/HPO.md."
+      tags:
+        project: "dais26-vfm"
+        component: "training"
+        temp: "anchor-ab"
+      # 8h as requested. NOTE: 02c runs TWO full-length (TRAIN_EPOCHS=50) 8xH100
+      # arms sequentially via @distributed (which inherits this job timeout). If
+      # the two arms don't both finish inside 8h, raise this (the hpo_sweep job
+      # uses 172800 = 48h for the same reason) or lower AB_EPOCHS in the notebook.
+      timeout_seconds: 28800
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+
+      # Same env shape as train_detector.yml: setup runs on the standard
+      # serverless env; the A/B task runs on Serverless GPU (8xH100,
+      # "databricks_ai_v5") where serverless_gpu (used by @distributed) and CUDA
+      # are available — the Phase-1 probe loads DINOv3 onto the driver GPU.
+      # The gated DINOv3 download needs the dais26-secrets/hf-token secret, read
+      # by the notebook via dbutils.secrets (create it before running).
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/00_setup.py"
+          environment_key: "default"
+          max_retries: 1
+
+        - task_key: "anchor_ab"
+          depends_on:
+            - task_key: "setup"
+          notebook_task:
+            notebook_path: "../../notebooks/02c_anchor_ab.py"
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_8xH100
+          max_retries: 1

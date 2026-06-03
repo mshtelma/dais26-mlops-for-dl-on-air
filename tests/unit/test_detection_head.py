@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from dais26_dentex.models.detection_head import (
+    DEFAULT_ANCHOR_OCTAVES,
     DEFAULT_ANCHOR_SCALES,
     AnchorGenerator,
     DetectionModel,
@@ -53,6 +54,110 @@ def test_anchor_generator_count_and_shape():
     # All anchors should have x2 > x1, y2 > y1
     assert (anchors[:, 2] > anchors[:, 0]).all()
     assert (anchors[:, 3] > anchors[:, 1]).all()
+
+
+def test_anchor_generator_per_level_count():
+    """per_level layout: A = octaves x ratios, uniform across levels."""
+    gen = AnchorGenerator(
+        aspect_ratios=[0.5, 1.0, 2.0],
+        layout="per_level",
+        base_scale=4.0,
+        octaves=list(DEFAULT_ANCHOR_OCTAVES),
+    )
+    assert gen.num_anchors_per_cell == 9  # 3 octaves x 3 ratios
+    features = {
+        "p3": torch.zeros(1, 256, 8, 8),
+        "p4": torch.zeros(1, 256, 4, 4),
+        "p5": torch.zeros(1, 256, 2, 2),
+        "p6": torch.zeros(1, 256, 1, 1),
+    }
+    anchors = gen(features)
+    expected = (8 * 8 + 4 * 4 + 2 * 2 + 1 * 1) * 9
+    assert anchors.shape == (expected, 4)
+
+
+def test_anchor_generator_per_level_sizes_scale_with_stride():
+    """Base anchor size = stride * base_scale, so p6 anchors dwarf p3 anchors."""
+    gen = AnchorGenerator(aspect_ratios=[1.0], layout="per_level", base_scale=4.0, octaves=[1.0])
+    p3 = gen._sizes_for_stride(AnchorGenerator.LEVEL_STRIDES["p3"])  # stride 8
+    p6 = gen._sizes_for_stride(AnchorGenerator.LEVEL_STRIDES["p6"])  # stride 64
+    assert p3 == [8 * 4.0]
+    assert p6 == [64 * 4.0]
+    assert p6[0] == p3[0] * 8
+
+
+def test_anchor_generator_absolute_layout_unchanged():
+    """absolute layout still places the full scale list at every level."""
+    gen = AnchorGenerator(scales=[16, 32, 64, 128], aspect_ratios=[0.5, 1.0, 2.0])
+    assert gen.layout == "absolute"
+    assert gen.num_anchors_per_cell == 12
+    # Sizes are stride-independent in absolute mode.
+    assert gen._sizes_for_stride(8) == gen._sizes_for_stride(64)
+
+
+def test_anchor_generator_rejects_bad_layout():
+    import pytest
+
+    with pytest.raises(ValueError, match="layout"):
+        AnchorGenerator(layout="pyramid")
+
+
+def test_detection_model_head_count_matches_per_level_anchors():
+    """The shared head must emit exactly the generator's per-cell anchor count."""
+
+    class FakeBackbone(nn.Module):
+        def forward(self, x: torch.Tensor):
+            b, _, h, w = x.shape
+            return torch.randn(b, 1152), torch.randn(b, (h // 16) * (w // 16), 1152)
+
+    model = DetectionModel(
+        backbone=FakeBackbone(),
+        spatial_dim=1152,
+        num_classes=4,
+        aspect_ratios=[0.5, 1.0, 2.0],
+        anchor_layout="per_level",
+        anchor_octaves=list(DEFAULT_ANCHOR_OCTAVES),
+    )
+    assert model.head.num_anchors == model.anchor_gen.num_anchors_per_cell == 9
+    model.eval()
+    with torch.no_grad():
+        cls_logits, box_reg, anchors = model.forward_train(torch.randn(1, 3, 256, 256))
+    # Head outputs and generated anchors must line up 1:1.
+    assert cls_logits.shape[1] == box_reg.shape[1] == anchors.shape[0]
+
+
+def test_nms_per_class_flag_wired_and_both_modes_run():
+    """The nms_per_class flag is stored and both NMS paths produce valid output."""
+
+    class FakeBackbone(nn.Module):
+        def forward(self, x: torch.Tensor):
+            b, _, h, w = x.shape
+            return torch.randn(b, 1152), torch.randn(b, (h // 16) * (w // 16), 1152)
+
+    for flag in (False, True):
+        torch.manual_seed(0)
+        model = DetectionModel(backbone=FakeBackbone(), spatial_dim=1152, nms_per_class=flag)
+        assert model.nms_per_class is flag
+        model.eval()
+        with torch.no_grad():
+            out = model(torch.randn(1, 3, 256, 256))
+        box, score, label = out["boxes"][0], out["scores"][0], out["labels"][0]
+        assert box.shape[0] == score.shape[0] == label.shape[0]
+
+
+def test_per_class_nms_semantics_keep_colocated_cross_class():
+    """batched_nms (per-class) keeps two identical boxes of different classes;
+    a single class-agnostic nms suppresses the lower-scoring one."""
+    from torchvision.ops import batched_nms, nms
+
+    boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 10.0, 10.0]])  # identical
+    scores = torch.tensor([0.9, 0.8])
+    labels = torch.tensor([0, 1])  # different classes
+
+    agnostic = nms(boxes, scores, 0.5)
+    per_class = batched_nms(boxes, scores, labels, 0.5)
+    assert agnostic.numel() == 1  # one suppressed
+    assert per_class.numel() == 2  # both kept (different classes)
 
 
 def test_focal_loss_returns_scalar():

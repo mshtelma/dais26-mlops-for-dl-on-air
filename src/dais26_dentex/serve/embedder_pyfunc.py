@@ -61,6 +61,10 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
             device=device,
             local_files_only=offline,
         )
+        # Match the backbone's pretraining normalisation (CLIP for C-RADIO,
+        # ImageNet for DINOv2/v3) rather than hardcoding CLIP for every backbone.
+        self.norm_mean: list[float] = list(self.info.image_mean)
+        self.norm_std: list[float] = list(self.info.image_std)
         self.backbone.eval()
         if device == "cuda":
             try:
@@ -73,8 +77,8 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
         raw = base64.b64decode(b64_str)
         img = Image.open(io.BytesIO(raw)).convert("RGB").resize((self.input_size, self.input_size))
         arr = np.array(img, dtype=np.float32) / 255.0
-        mean = np.array(self.CLIP_MEAN, dtype=np.float32).reshape(3, 1, 1)
-        std = np.array(self.CLIP_STD, dtype=np.float32).reshape(3, 1, 1)
+        mean = np.array(self.norm_mean, dtype=np.float32).reshape(3, 1, 1)
+        std = np.array(self.norm_std, dtype=np.float32).reshape(3, 1, 1)
         arr = arr.transpose(2, 0, 1)
         arr = (arr - mean) / std
         return torch.from_numpy(arr)
