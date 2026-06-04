@@ -21,7 +21,7 @@ def test_train_no_data_runs_config_only(monkeypatch, tmp_path: Path):
     (but skip dataloaders)."""
     from dais26_dentex.models.backbones import BackboneInfo
 
-    def fake_load(name, revision=None, cache_dir=None, device="cpu"):
+    def fake_load(name, revision=None, cache_dir=None, device="cpu", **kwargs):
         return _FakeBackbone(), BackboneInfo(
             name=name,
             summary_dim=1152,
