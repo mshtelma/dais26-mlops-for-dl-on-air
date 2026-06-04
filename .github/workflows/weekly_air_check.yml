@@ -6,23 +6,28 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write   # gh-pages state push
 
 jobs:
   check-air:
     runs-on: ubuntu-latest
+    # OAuth M2M auth via the `ci` GitHub Environment (scopes the SP secret; no
+    # required reviewers — runs on a schedule). See docs/RUNBOOK.md#cicd-oauth-m2m.
+    environment: ci
+    env:
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Install Databricks CLI
-        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sudo sh
+        uses: databricks/setup-cli@main
 
       - name: Check AIR availability with state tracking
-        env:
-          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
         run: |
           set -e
           STATE_FILE=".air-availability-state.json"

@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -55,14 +58,21 @@ jobs:
   dab-validate:
     runs-on: ubuntu-latest
     continue-on-error: true
+    # OAuth M2M auth via the `ci` GitHub Environment (scopes the SP secret; must
+    # NOT have required reviewers — CI runs unattended). Fork PRs can't read
+    # environment secrets, so this job no-ops there (it is continue-on-error).
+    # See docs/RUNBOOK.md#cicd-oauth-m2m.
+    environment: ci
     env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Databricks CLI
-        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sudo sh
+        uses: databricks/setup-cli@main
 
       - name: Validate bundle (dev_non_air target)
         run: databricks bundle validate -t dev_non_air
