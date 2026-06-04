@@ -464,7 +464,7 @@ The `applicationId` used in DAB `run_as` must match the Entra App ID, not the Da
 
 ### CI/CD via OAuth M2M (service principal client id + secret) {#cicd-oauth-m2m}
 
-All three workflows authenticate to Databricks via **OAuth machine-to-machine
+The deploy workflow authenticates to Databricks via **OAuth machine-to-machine
 (M2M)** using the SP's client id + an OAuth secret. The secret mints short-lived
 OAuth tokens (no long-lived PAT). This path needs only **SP-create + OAuth-secret**
 rights — **no account admin / workload-identity-federation policy** (that route is
@@ -472,8 +472,11 @@ account-admin-only; use it instead if you have account-admin access).
 
 - `.github/workflows/deploy.yml` — deploys the bundle + runs `connect_deployment_job`
   (environments `dev`/`prod`).
-- `.github/workflows/ci.yml` (`dab-validate`) — read-only check; uses the shared
-  `ci` environment.
+
+> `databricks bundle validate` is **not** run in CI: the workspace enforces an IP
+> access list that blocks GitHub-hosted runner IPs (403). Run it locally before
+> pushing (`databricks bundle validate -t dev`), or move it to a self-hosted runner
+> inside the allowed network.
 
 One-time setup:
 

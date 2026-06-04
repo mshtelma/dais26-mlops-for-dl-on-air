@@ -55,24 +55,7 @@ jobs:
           /tmp/wheel_test/bin/pip install dist/*.whl
           /tmp/wheel_test/bin/python -c "import dais26_dentex; print(dais26_dentex.__version__)"
 
-  dab-validate:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    # OAuth M2M auth via the `ci` GitHub Environment (scopes the SP secret; must
-    # NOT have required reviewers — CI runs unattended). Fork PRs can't read
-    # environment secrets, so this job no-ops there (it is continue-on-error).
-    # See docs/RUNBOOK.md#cicd-oauth-m2m.
-    environment: ci
-    env:
-      DATABRICKS_AUTH_TYPE: oauth-m2m
-      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
-      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
-      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Databricks CLI
-        uses: databricks/setup-cli@main
-
-      - name: Validate bundle (dev target)
-        run: databricks bundle validate -t dev
+  # NOTE: `databricks bundle validate` is intentionally NOT run in CI. The target
+  # workspace enforces an IP access list that blocks GitHub-hosted runner IPs
+  # (403), and validate must contact the workspace. Validate locally before
+  # pushing: `databricks bundle validate -t dev`.
