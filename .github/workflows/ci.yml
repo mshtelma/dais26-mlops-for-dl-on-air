@@ -74,5 +74,5 @@ jobs:
       - name: Install Databricks CLI
         uses: databricks/setup-cli@main
 
-      - name: Validate bundle (dev_non_air target)
-        run: databricks bundle validate -t dev_non_air
+      - name: Validate bundle (dev target)
+        run: databricks bundle validate -t dev

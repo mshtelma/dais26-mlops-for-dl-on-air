@@ -472,8 +472,8 @@ account-admin-only; use it instead if you have account-admin access).
 
 - `.github/workflows/deploy.yml` — deploys the bundle + runs `connect_deployment_job`
   (environments `dev`/`prod`).
-- `.github/workflows/ci.yml` (`dab-validate`) and `weekly_air_check.yml` (`check-air`)
-  — read-only checks; both use a shared `ci` environment.
+- `.github/workflows/ci.yml` (`dab-validate`) — read-only check; uses the shared
+  `ci` environment.
 
 One-time setup:
 

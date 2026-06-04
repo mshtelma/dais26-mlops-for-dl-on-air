@@ -14,7 +14,6 @@ Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 
 ![CI](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg)
 ![DAB Validate](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg?job=dab-validate)
-![Weekly AIR Check](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/weekly_air_check.yml/badge.svg)
 
 ## What this repo demonstrates
 
