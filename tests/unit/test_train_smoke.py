@@ -32,6 +32,10 @@ def test_train_no_data_runs_config_only(monkeypatch, tmp_path: Path):
         )
 
     monkeypatch.setattr("dais26_dentex.models.backbones.load_backbone", fake_load)
+    # `builder.py` binds `load_backbone` at import time (`from ... import
+    # load_backbone`), so patch that reference too — otherwise build_detector
+    # calls the real loader and hits the HF Hub (fails offline/in CI).
+    monkeypatch.setattr("dais26_dentex.models.builder.load_backbone", fake_load)
 
     # Local MLflow tracking
     monkeypatch.setenv("MLFLOW_TRACKING_URI", f"file://{tmp_path}/mlruns")

@@ -24,10 +24,13 @@ def mock_heavy_deps(monkeypatch):
     fake_info.spatial_dim = 64
     fake_info.patch_size = 16
 
-    monkeypatch.setattr(
-        "dais26_dentex.models.backbones.load_backbone",
-        lambda **kw: (fake_bb, fake_info),
-    )
+    def _fake_load(**kw):
+        return (fake_bb, fake_info)
+
+    monkeypatch.setattr("dais26_dentex.models.backbones.load_backbone", _fake_load)
+    # `builder.py` binds `load_backbone` at import time, so patch that reference
+    # too — otherwise build_detector calls the real loader and hits the HF Hub.
+    monkeypatch.setattr("dais26_dentex.models.builder.load_backbone", _fake_load)
 
     import torch.nn as nn
 
