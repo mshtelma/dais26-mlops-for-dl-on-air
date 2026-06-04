@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass
 from datetime import timedelta
 
+from dais26_dentex.config.constants import ALIAS_CANDIDATE
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +93,7 @@ def deploy_and_smoke_test(
     catalog: str,
     schema: str,
     model_name: str,
-    candidate_alias: str = "candidate",
+    candidate_alias: str = ALIAS_CANDIDATE,
     workload_size: str = "Small",
     workload_type: str = "GPU_SMALL",
     scale_to_zero: bool = True,
@@ -100,9 +102,18 @@ def deploy_and_smoke_test(
     smoke_image_bytes: bytes | None = None,
     timeout_seconds: int = 600,
     promote_on_success: bool = True,
+    model_version: str | None = None,
 ) -> EndpointDeployResult:
-    """Resolve @candidate to numeric version, deploy/update endpoint, smoke-test, and
-    optionally promote to @champion.
+    """Resolve a version, deploy/update endpoint, smoke-test, and optionally
+    promote to @champion.
+
+    When ``model_version`` is given it is deployed directly (the cross-schema
+    promote task already knows the prod version it copied); otherwise the
+    ``candidate_alias`` (``@challenger`` by default) is resolved to a numeric
+    version. ``promote_on_success=True`` sets ``@champion`` on
+    ``{catalog}.{schema}.{model_name}`` after a passing smoke test, so the
+    promote task can deploy the prod-schema version AND flip its champion alias
+    in one call (and leave @champion untouched on failure).
 
     Uses Databricks SDK's create_and_wait / update_config_and_wait pattern.
     """
@@ -118,10 +129,15 @@ def deploy_and_smoke_test(
 
     w = WorkspaceClient()
 
-    # 1. Resolve @candidate to numeric version
-    version = resolve_alias_to_version(catalog, schema, model_name, candidate_alias)
+    # 1. Resolve the version to deploy: an explicit numeric version (prod
+    #    promote path) wins; otherwise resolve the dev @challenger alias.
     full_model = f"{catalog}.{schema}.{model_name}"
-    logger.info("Resolved @%s -> version %s for %s", candidate_alias, version, full_model)
+    if model_version is not None:
+        version = str(model_version)
+        logger.info("Deploying explicit version %s for %s", version, full_model)
+    else:
+        version = resolve_alias_to_version(catalog, schema, model_name, candidate_alias)
+        logger.info("Resolved @%s -> version %s for %s", candidate_alias, version, full_model)
 
     # 2. Capture previous @champion for potential rollback
     previous = capture_previous_champion(catalog, schema, model_name)

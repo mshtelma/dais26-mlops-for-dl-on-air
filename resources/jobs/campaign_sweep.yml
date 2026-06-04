@@ -19,10 +19,10 @@ resources:
       timeout_seconds: 172800
       queue:
         enabled: true
-      # Allow several stages to run at once (e.g. C-RADIO 150ep + C-RADIO s2 +
-      # DINOv3 focal_alpha); each grabs its own 8xH100, so they only serialize if
-      # the GPU pool is full.
-      max_concurrent_runs: 3
+      # Allow several stages to run at once (Track A: C-RADIO 150ep + C-RADIO s2 +
+      # DINOv3 focal_alpha; Track B: DINOv3 fusion + C-RADIO giou). Each grabs its
+      # own 8xH100, so beyond the GPU-pool size they queue at the compute layer.
+      max_concurrent_runs: 5
       performance_target: PERFORMANCE_OPTIMIZED
 
       # `sweep_stage` is read as a notebook widget by 02b_hpo_sweep.py. Override at

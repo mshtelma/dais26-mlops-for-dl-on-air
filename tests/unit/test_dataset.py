@@ -116,3 +116,63 @@ def test_detection_collate():
     assert images.shape == (2, 3, 16, 16)
     assert len(targets) == 2
     assert targets[0]["boxes"].shape == (2, 4)
+
+
+# ---------------------------------------------------------------------------
+# Caries oversampling (Track B): per_image_label_sets + index expansion
+# ---------------------------------------------------------------------------
+
+
+def test_per_image_label_sets(train_dataset):
+    sets = train_dataset.per_image_label_sets()
+    assert len(sets) == len(train_dataset)
+    assert all(isinstance(s, set) for s in sets)
+
+
+def test_oversample_identity_when_factor_one():
+    from dais26_dentex.data.dataset import build_caries_oversampled_indices
+
+    label_sets = [{0}, {1}, {0, 2}]
+    assert build_caries_oversampled_indices(label_sets, 1.0, positive_class=0) == [0, 1, 2]
+
+
+def test_oversample_integer_factor_doubles_positives():
+    from dais26_dentex.data.dataset import build_caries_oversampled_indices
+
+    # indices 0 and 2 contain Caries (class 0); index 1 does not.
+    label_sets = [{0}, {1}, {0, 2}]
+    expanded = build_caries_oversampled_indices(label_sets, 2.0, positive_class=0)
+    # Every image once + one extra copy of each positive.
+    assert sorted(expanded) == [0, 0, 1, 2, 2]
+    assert expanded.count(0) == 2
+    assert expanded.count(2) == 2
+    assert expanded.count(1) == 1
+
+
+def test_oversample_fractional_factor_partial_extra():
+    from dais26_dentex.data.dataset import build_caries_oversampled_indices
+
+    # 4 positives, factor 1.5 → round(0.5*4)=2 extra copies (first two positives).
+    label_sets = [{0}, {0}, {0}, {0}, {1}]
+    expanded = build_caries_oversampled_indices(label_sets, 1.5, positive_class=0)
+    assert len(expanded) == 5 + 2
+    assert expanded[:5] == [0, 1, 2, 3, 4]
+    assert expanded[5:] == [0, 1]
+
+
+def test_oversample_deterministic():
+    from dais26_dentex.data.dataset import build_caries_oversampled_indices
+
+    label_sets = [{0}, {1}, {0, 2}, {3}, {0}]
+    a = build_caries_oversampled_indices(label_sets, 2.0)
+    b = build_caries_oversampled_indices(label_sets, 2.0)
+    assert a == b  # no RNG → every DDP rank agrees
+
+
+def test_index_remap_dataset_maps_and_lengths():
+    from dais26_dentex.data.dataset import IndexRemapDataset
+
+    base = ["a", "b", "c"]
+    remap = IndexRemapDataset(base, [0, 0, 2])
+    assert len(remap) == 3
+    assert [remap[i] for i in range(len(remap))] == ["a", "a", "c"]

@@ -87,6 +87,7 @@ def build_detector(
             cache_dir=cfg.cache_dir,
             device=str(device),
             freeze=freeze,
+            fusion_layers=cfg.fusion_layers,
         )
 
     if mode == "lora":

@@ -28,9 +28,15 @@ MODEL_CACHE_DIR: Final[str] = "model_cache"
 MANIFEST_FILE: Final[str] = "manifest.json"  # v2 only
 
 # --- UC Model Registry aliases ------------------------------------------
-# `@candidate` is set by training; `@champion` is set by the smoke-test gate
-# AFTER candidate evaluation passes (see docs/RUNBOOK.md#promotion-gate).
-ALIAS_CANDIDATE: Final[str] = "candidate"
+# `@challenger` is set on the dev-schema model by training / the HPO sweep
+# (Big Book "deploy code" terminology); registering a new @challenger version
+# auto-triggers the deployment job. `@champion` is set on the separate prod
+# schema model by the promote task after eval + approval pass (see
+# docs/RUNBOOK.md#deployment-job). The constant name keeps the historical
+# `ALIAS_CANDIDATE` identifier so existing call sites (set_candidate_alias,
+# the `candidate_alias` kwargs) stay stable; only the alias VALUE moved to
+# `challenger`.
+ALIAS_CANDIDATE: Final[str] = "challenger"
 ALIAS_CHAMPION: Final[str] = "champion"
 
 

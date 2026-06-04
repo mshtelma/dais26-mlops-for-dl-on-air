@@ -17,8 +17,10 @@
 # MAGIC 2. start a parent run; for each trial build a `TrainerConfig` (00_config defaults
 # MAGIC    + trial override), train with `register_model=False`, tag the run as nested.
 # MAGIC 3. pick the winner by `SWEEP_PRIMARY_METRIC`; retrain it at both `TRAIN_EPOCHS`
-# MAGIC    and `TRAIN_EPOCHS_LONG` with `register_model=True`, then point `@candidate`
-# MAGIC    at whichever schedule scored higher (only the winner config is registered).
+# MAGIC    and `TRAIN_EPOCHS_LONG` with `register_model=True`, then point `@challenger`
+# MAGIC    at whichever schedule scored higher — but only when it beats the prior best
+# MAGIC    in the experiment (the challenger registration gate; only the winner config
+# MAGIC    is registered).
 # MAGIC
 # MAGIC Requires the orchestrating job to carry the 8h timeout (see `resources/jobs`).
 
@@ -37,7 +39,13 @@ import os
 import mlflow
 from mlflow.tracking import MlflowClient
 
-from dais26_dentex.train.sweep import TrialResult, iter_trials, select_best
+from dais26_dentex.config.constants import ALIAS_CANDIDATE
+from dais26_dentex.train.sweep import (
+    TrialResult,
+    beats_experiment_best,
+    iter_trials,
+    select_best,
+)
 
 # HF token for gated backbones (DINOv3); empty string is a no-op for C-RADIO.
 try:
@@ -231,9 +239,10 @@ with mlflow.start_run(run_name=f"hpo-sweep-{BACKBONE}") as parent:
 # The per-level anchor fix reshapes the matcher/loss landscape, so the prior ~e40
 # saturation point may move. Retrain the winning config at both the short and long
 # schedules and keep whichever scores higher on SWEEP_PRIMARY_METRIC. Both runs
-# register a UC version (the Trainer sets @candidate to itself and logs the version
-# as the `registered_version` param); after both finish we move @candidate onto the
-# better run's version. The Trainer tracks the best checkpoint, so a 100-epoch run
+# register a UC version (the Trainer sets @challenger to itself and logs the version
+# as the `registered_version` param); after both finish we move @challenger onto the
+# better run's version IF it clears the best-in-experiment gate (below). The Trainer
+# tracks the best checkpoint, so a 100-epoch run
 # that peaks early still registers its peak rather than an over-trained final epoch.
 # Retrain when registering (legacy + finalize stages) OR when a measure-only
 # stage is active (s1-s3 need the full-length metric for their gate).
@@ -266,14 +275,46 @@ if _DO_RETRAIN:
     )
     print(f"\nBest full-length retrain: run {winner_rid} {SWEEP_PRIMARY_METRIC}={winner_metric}")
     if _REGISTER_WINNER and winner_version is not None:
-        # Each registering retrain set @candidate to itself, so the alias points
-        # at the last-trained schedule; re-point it at the better run's version.
-        client.set_registered_model_alias(full_model, "candidate", winner_version)
-        print(f"@candidate -> version {winner_version} (run {winner_rid})")
+        # ---- Challenger registration gate (best-in-experiment) ----
+        # The retrains already registered a UC version AND set @challenger onto the
+        # last-trained schedule. Only KEEP @challenger on the new winner when its
+        # validation SWEEP_PRIMARY_METRIC strictly beats every PRIOR registered
+        # version's (the experiment bar); otherwise restore @challenger to the prior
+        # best version so a regression never becomes the challenger that triggers the
+        # deployment job. Comparison is the pure `beats_experiment_best` (unit-tested).
+        prior: list[tuple[str, float]] = []
+        for mv in client.search_model_versions(f"name='{full_model}'"):
+            if str(mv.version) == str(winner_version) or not mv.run_id:
+                continue
+            try:
+                m = client.get_run(mv.run_id).data.metrics.get(SWEEP_PRIMARY_METRIC)
+            except Exception:
+                m = None
+            if m is not None:
+                prior.append((str(mv.version), float(m)))
+
+        if beats_experiment_best(winner_metric, [m for _, m in prior], higher_is_better=True):
+            client.set_registered_model_alias(full_model, ALIAS_CANDIDATE, winner_version)
+            bar = max((m for _, m in prior), default=None)
+            print(
+                f"@{ALIAS_CANDIDATE} -> version {winner_version} (run {winner_rid}); "
+                f"{SWEEP_PRIMARY_METRIC}={winner_metric} beats prior best {bar}."
+            )
+        elif prior:
+            best_prior_version = max(prior, key=lambda vm: vm[1])[0]
+            client.set_registered_model_alias(full_model, ALIAS_CANDIDATE, best_prior_version)
+            print(
+                f"Gate NOT passed: winner {SWEEP_PRIMARY_METRIC}={winner_metric} does not beat "
+                f"prior best {max(m for _, m in prior)}; restored @{ALIAS_CANDIDATE} -> "
+                f"version {best_prior_version}. New version {winner_version} registered but not challenger."
+            )
+        else:
+            client.set_registered_model_alias(full_model, ALIAS_CANDIDATE, winner_version)
+            print(f"@{ALIAS_CANDIDATE} -> version {winner_version} (run {winner_rid}); first measurable version.")
     elif _REGISTER_WINNER:
         print(f"No registered_version on the winning run ({winner_rid}); alias left as-is.")
     else:
-        print("Stage register_winner=False — measured full-length metric only; @candidate unchanged.")
+        print(f"Stage register_winner=False — measured full-length metric only; @{ALIAS_CANDIDATE} unchanged.")
     dbutils.jobs.taskValues.set(key="run_id", value=winner_rid)
 else:
     dbutils.jobs.taskValues.set(key="run_id", value=(best.run_id if best else None))

@@ -29,7 +29,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -152,11 +152,45 @@ def select_best(
     )
 
 
+def beats_experiment_best(
+    candidate_metric: float | None,
+    existing_metrics: Iterable[float | None],
+    *,
+    higher_is_better: bool = True,
+) -> bool:
+    """Return True if ``candidate_metric`` STRICTLY beats every existing metric.
+
+    The "challenger registration gate": a freshly retrained winner only earns the
+    ``@challenger`` alias when its validation metric strictly improves on the best
+    existing registered version / run in the experiment. Pure comparison so the
+    notebook (``02b_hpo_sweep.py``) just supplies the numbers.
+
+    Semantics:
+      * ``candidate_metric is None`` (the run never produced a metric) -> False;
+        you can't promote a result you can't measure.
+      * ``None`` entries in ``existing_metrics`` are ignored (failed prior runs).
+      * No scored existing metrics (empty, or all None) -> True; nothing to beat,
+        so the first measurable version becomes the challenger.
+      * Otherwise: strictly greater than the max (``higher_is_better``) or strictly
+        less than the min. Ties do NOT pass — an equal challenger does not displace
+        the incumbent.
+    """
+    if candidate_metric is None:
+        return False
+    scored = [m for m in existing_metrics if m is not None]
+    if not scored:
+        return True
+    if higher_is_better:
+        return candidate_metric > max(scored)
+    return candidate_metric < min(scored)
+
+
 __all__ = [
     "FieldSpec",
     "SearchSpace",
     "Trial",
     "TrialResult",
+    "beats_experiment_best",
     "grid_size",
     "iter_trials",
     "select_best",

@@ -115,10 +115,12 @@ def test_volumepath_subpath_is_not_validated_as_uc_ident() -> None:
 
 
 def test_alias_constants_are_stable() -> None:
-    """Loose strings used to live inline (`"candidate"`, `"champion"`); the
+    """Loose strings used to live inline (`"challenger"`, `"champion"`); the
     refactor consolidates them. If a teammate accidentally edits the values
     in `config.constants`, this test fails — and the registry-aliasing
     contract is exactly the kind of invariant we want a green test to
-    guard."""
-    assert ALIAS_CANDIDATE == "candidate"
+    guard. The dev alias value moved `candidate` -> `challenger` to match the
+    Big Book "deploy code" terminology (the constant NAME `ALIAS_CANDIDATE`
+    stays for call-site stability)."""
+    assert ALIAS_CANDIDATE == "challenger"
     assert ALIAS_CHAMPION == "champion"

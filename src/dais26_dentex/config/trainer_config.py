@@ -89,6 +89,14 @@ class TrainerConfig:
     backbone_name: str = "cradio_v4_so400m"
     backbone_revision: str | None = None
     cache_dir: str | None = None
+    # Multi-layer ViT feature fusion: hidden-state layer indices to fuse into the
+    # single spatial map the FPN consumes. `None` (default) = legacy last-layer-
+    # only behavior. e.g. [6, 12, 18, 24] fuses 4 depths via a learnable softmax
+    # weighted sum (ViT-Det style), which usually beats last-layer-only for
+    # detection on ViT backbones. Requires an HF backbone exposing
+    # `output_hidden_states` (dinov3_vitl16 / dinov2_base); see
+    # `models.backbones` and docs/HPO.md "Multi-layer fusion".
+    fusion_layers: list[int] | None = None
 
     # --- Data ------------------------------------------------------------
     volume_path: str | None = None
@@ -131,6 +139,12 @@ class TrainerConfig:
     # (legacy). Both bounds must be in (0, 1] — we only down-scale to avoid
     # cropping content out of the fixed `img_size` canvas.
     aug_multiscale_range: list[float] | None = None
+    # Class-balanced oversampling: replicate training images that contain at least
+    # one box of the hard class (Caries, label id 0) by this integer-ish factor
+    # via a WeightedRandomSampler. 1.0 (default) = legacy uniform sampling. e.g.
+    # 2.0 makes Caries-bearing images ~2x as likely per epoch, directly targeting
+    # the binding Caries AP@50 gate. Applied train-only; val is untouched.
+    caries_oversample: float = 1.0
 
     # --- Mixed precision -------------------------------------------------
     # Autocast dtype for CUDA training. "auto" resolves to bf16 for DINOv3
@@ -148,6 +162,11 @@ class TrainerConfig:
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     box_loss_weight: float = 1.0
+    # Box-regression loss function. "smooth_l1" (default) is the legacy delta
+    # Huber loss; "giou" computes 1 - generalized-IoU on decoded boxes, which is
+    # scale-invariant and usually improves localization (mAP@50:95) and small-box
+    # recall. See `train.losses.giou_box_loss`.
+    box_loss_type: str = "smooth_l1"
 
     # --- Detection -------------------------------------------------------
     # `num_classes=None` defers to `len(get_label_map())` at trainer build time.
@@ -262,6 +281,7 @@ class TrainerConfig:
             "aug_jitter_prob",
             "aug_jitter_scale",
             "aug_rotation_deg",
+            "caries_oversample",
         }
     )
     _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -301,7 +321,7 @@ class TrainerConfig:
                 cleaned[k] = float(v)
             elif k in cls._BOOL_FIELDS:
                 cleaned[k] = _coerce_bool(v)
-            elif k == "anchor_scales":
+            elif k in ("anchor_scales", "fusion_layers"):
                 cleaned[k] = [int(x) for x in v]
             elif k in ("aspect_ratios", "anchor_octaves", "aug_multiscale_range"):
                 cleaned[k] = [float(x) for x in v]
@@ -469,6 +489,18 @@ class TrainerConfig:
                 errs.append(
                     "aug_multiscale_range must be [lo, hi] with 0 < lo <= hi <= 1, "
                     f"got {self.aug_multiscale_range}"
+                )
+        if self.box_loss_type not in ALLOWED_BOX_LOSS_TYPES:
+            errs.append(f"box_loss_type {self.box_loss_type!r} not in {ALLOWED_BOX_LOSS_TYPES}")
+        if self.caries_oversample < 1.0:
+            errs.append(f"caries_oversample must be >= 1.0, got {self.caries_oversample}")
+        if self.fusion_layers is not None:
+            if len(self.fusion_layers) == 0:
+                errs.append("fusion_layers must be a non-empty list of ints (or None)")
+            if self.backbone_name != "dinov3_vitl16":
+                errs.append(
+                    "fusion_layers is currently only supported for dinov3_vitl16 "
+                    f"(HF output_hidden_states), not {self.backbone_name!r}"
                 )
         if errs:
             raise ValueError("TrainerConfig validation failed:\n  - " + "\n  - ".join(errs))

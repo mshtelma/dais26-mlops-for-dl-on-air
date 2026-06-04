@@ -18,6 +18,15 @@ Experiment: `/Users/puneet.jain@databricks.com/dais26-detector` (`experiment_id 
   + per-class NMS, full fine-tune, 50ep). That is **+0.187 over the prior best**, clears the
   **0.45 must-ship** bar, and reaches ~87% of the **0.60** RetinaNet-parity stretch. Registered as
   `mlops_pj.dais26_vfm.cradio_detector` **v10**, aliased `@candidate`.
+- **Push-to-0.60 campaign status (current best):** **C-RADIO 0.5931** (`dazzling-mole-850`,
+  plain 150ep) and **DINOv3 0.5738** (`capricious-hound-240`, multi-layer fusion + 150ep).
+  C-RADIO's lever is the **schedule** (150ep = +0.028); DINOv3's was **architectural** —
+  multi-layer ViT feature fusion broke a hard ~0.535 ceiling that no knob could, and
+  compounding fusion with the long schedule took it to **0.574** (+0.056 over its 0.518
+  baseline). Round-4 finalize (compounding) is **done**: the fusion×schedule compound *won* for
+  DINOv3, but GIoU+oversampling *regressed* C-RADIO at 150ep — so the best C-RADIO remains the
+  plain `dazzling-mole-850`. Both still ~0.01–0.04 short of 0.60. Full detail below in "Round 3
+  returns" / "Round 4 returns" and the results-tracking table.
 
 ## Where mAP has moved
 
@@ -482,11 +491,15 @@ ensembling (the no-ensemble constraint).
 | dinov3_s2 | DINOv3 | base_scale, octaves, AR, fg, box, blr @1280+aug | `serious-kit-244` (fg=2.5, 3-oct, AR[.5,1,2]) | 0.5256 (50:95=0.301) | _pending_ | **no gain — below the regres base (0.5355); anchor/loss lever tapped** |
 | dinov3_s3 | DINOv3 | multiscale, rotation, jitter | _superseded by regres_ | — | — | folded into `dinov3_regres` |
 | dinov3_res1536 | DINOv3 | **step-change**: 1536px + aug, 100ep, b1×accum4 | `vaunted-crane-68` | 0.5326 (50:95=**0.3238**) | _pending_ | **1536 ≈ 1280; no mAP@50 gain — ceiling confirmed ~0.53** |
-| dinov3_s4 | DINOv3 | combined best (register) | _pending_ | _pending_ | _pending_ | gate 0.58/0.30 |
-| cradio_s1 | C-RADIO | {75,100}ep × img_size × lr × pct_start (+mild aug) | `useful-mare-854` (1024px, 100ep, lr2e-4, pct0.2) | **0.5648** (50:95=0.291) | _pending_ | **breakout +0.043 over baseline; still rising at e100 → schedule/aug is the lever** |
-| cradio_s2 | C-RADIO | base_scale, octaves, AR, fg, box, fa, blr | _pending_ | _pending_ | _pending_ | _pending_ |
-| cradio_s3 | C-RADIO | multiscale, rotation | _pending_ | _pending_ | _pending_ | _pending_ |
-| cradio_s4 | C-RADIO | combined best (register) | _pending_ | _pending_ | _pending_ | gate 0.58/0.30 |
+| dinov3_falpha | DINOv3 | focal_alpha on `victorious-goose-410` base | `casual-jay-300` (75ep) | 0.5163 | _pending_ | **no gain — below fusion + below regres base** |
+| **dinov3_fusion** | DINOv3 | **multi-layer ViT fusion** (L6/12/18/24) @1280+aug, 75ep | **`delicate-stork-19`** | **0.5504** (50:95=**0.321**) | _pending_ | **best DINOv3 — broke the ~0.535 ceiling (+0.015); architectural lever, not a knob** |
+| **dinov3_final** | DINOv3 | fusion + **150ep** (smooth_l1), register | **`capricious-hound-240`** (v7) | **0.5738** (50:95=0.333) | _pending_ | **best DINOv3 — fusion × long schedule compounded (+0.023 over fusion@75ep)** |
+| dinov3_final_giou | DINOv3 | fusion + 150ep + **GIoU**, register | `rebellious-gnu-395` (v8, `@candidate`) | 0.5704 (50:95=**0.340**) | _pending_ | GIoU −0.003 mAP@50 vs smooth_l1 but **best 50:95**; localization-leaning |
+| cradio_s1 | C-RADIO | {75,100}ep × img_size × lr × pct_start (+mild aug) | `useful-mare-854` (1024px, 100ep, lr2e-4, pct0.2) | 0.5648 (50:95=0.291) | _pending_ | breakout +0.043 over baseline; still rising at e100 → schedule/aug is the lever |
+| cradio_s2 | C-RADIO | base_scale, octaves, AR, fg, box, fa, blr | `polite-frog-337` (100ep) | 0.5489 | _pending_ | **no gain — below the `useful-mare-854` base; anchor/loss tapped for C-RADIO too** |
+| **cradio_long** | C-RADIO | **150ep** schedule on the `useful-mare-854` recipe | **`dazzling-mole-850`** | **0.5931** (50:95=0.304) | _pending_ | **best overall — +0.028 over s1; schedule is C-RADIO's dominant lever** |
+| cradio_giou | C-RADIO | **GIoU** box loss + **Caries ×2** oversample, 100ep | `amazing-moth-867` | 0.5674 (50:95=0.299) | _pending_ | +0.003 mAP@50 over s1; localization lever, additive |
+| cradio_final | C-RADIO | 150ep + GIoU + Caries×2, register | `resilient-moth-415` (v11, `@candidate`) | 0.5697 (50:95=0.288) | _pending_ | **regressed −0.023 vs plain 150ep — GIoU+oversample *hurt* at 150ep; best C-RADIO stays `dazzling-mole-850` 0.5931** |
 
 ### Live status & deviations from the linear plan
 
@@ -500,10 +513,21 @@ adaptations (both detailed below):
 - **Round 2 (done):** `dinov3_res1536` confirmed the DINOv3 ceiling (0.5326);
   `cradio_s1` broke C-RADIO out to **0.5648** (+0.043); `09b` banked thresholds +
   the 0.21 Caries baseline and exposed the broken registered DINOv3.
-- **Next:** DINOv3 is parked at 0.535 (register `victorious-goose-410` to fix the
-  broken serving model). The live target is now **C-RADIO**, which is still rising
-  at 100ep — pursue longer schedule (150ep) + `cradio_s2` anchor/loss (esp.
-  `focal_alpha` for the 0.21 Caries class) pinned on the `useful-mare-854` winner.
+- **Round 3 (done):** ran a config-track (Track A) and an architectural-track
+  (Track B) in parallel — see "Round 3 returns" below. Headlines: **C-RADIO 150ep
+  `dazzling-mole-850` = 0.5931** (new best overall) and **DINOv3 fusion
+  `delicate-stork-19` = 0.5504** (broke the ~0.535 DINOv3 ceiling, the only lever
+  that did). Anchor/loss and focal_alpha gave nothing on either backbone.
+- **Round 4 (done):** three finalize runs. **DINOv3 fusion×150ep `capricious-hound-240`
+  = 0.5738** (new best DINOv3, +0.023). C-RADIO's GIoU+oversample compound *regressed*
+  at 150ep (`resilient-moth-415` 0.5697 < plain-150ep 0.5931), so **best C-RADIO stays
+  `dazzling-mole-850` 0.5931**. See "Round 4 returns".
+- **Next (open):** champion promotion needs manual fix — the auto-`@candidate` aliases
+  point at sub-best runs (see "Champion registration" below). Register
+  `dazzling-mole-850` → `cradio_detector@champion`; set `dinov3_detector@champion` → v7
+  (`capricious-hound-240`); then run `09b` on the champions (Caries AP@50 gate + free
+  decode/NMS). C-RADIO is ~0.007 from 0.60 (push 175–200ep / 1280px); DINOv3 ~0.026
+  (fusion is working — more schedule or a wider fusion set).
 
 Note: the **deck** (`docs/TALK.md`) intentionally does **not** cover this campaign —
 it is the C-RADIO "one frozen backbone, three jobs" narrative. This `HPO.md` is the
@@ -616,6 +640,83 @@ Two things stand out:
 AP@50 baseline (from 09b on the *old* registered model) is **0.21** — the hard
 class and the binding half of the gate; Stage 2's focal_alpha / anchor density
 sweep targets exactly this.
+
+### Round 3 returns — Track A (config) + Track B (architecture), in parallel
+
+With DINOv3 capped on every *knob* and C-RADIO still rising, Round 3 split into two
+tracks run concurrently (`max_concurrent_runs` raised to 5 on `campaign_sweep`):
+
+- **Track A — config-only levers:** `cradio_long` (push the schedule to 150ep),
+  `cradio_s2` (anchor/loss sweep), `dinov3_falpha` (focal_alpha for the 0.21 Caries
+  class), all pinned on each backbone's best Round-2 recipe.
+- **Track B — architectural levers (new code, config-gated, default-off):**
+  `dinov3_fusion` (learnable softmax fusion of ViT hidden states L6/12/18/24 into the
+  FPN, vs last-layer-only) and `cradio_giou` (GIoU box loss + 2× Caries oversampling).
+  C-RADIO can't fuse (custom HF model), so it gets the backbone-agnostic Track-B levers.
+
+| Track | Stage | Run | mAP@50 | 50:95 | Δ vs prior best | Verdict |
+|-------|-------|-----|--------|-------|-----------------|---------|
+| A | `cradio_long` (150ep) | `dazzling-mole-850` | **0.5931** | 0.304 | **+0.028** (C-RADIO) | **best overall; schedule is the dominant C-RADIO lever** |
+| A | `cradio_s2` (anchor/loss) | `polite-frog-337` | 0.5489 | — | −0.016 | no gain (below s1 base) |
+| A | `dinov3_falpha` | `casual-jay-300` | 0.5163 | 0.302 | −0.034 | no gain (below fusion + regres base) |
+| B | `dinov3_fusion` (75ep) | `delicate-stork-19` | **0.5504** | **0.321** | **+0.015** (DINOv3) | **best DINOv3; broke the ~0.535 ceiling** |
+| B | `cradio_giou` (100ep) | `amazing-moth-867` | 0.5674 | 0.299 | +0.003 vs s1 | small but additive localization gain |
+
+**What this proves:**
+
+1. **The DINOv3 ceiling was architectural, not a tuning failure.** Every *knob*
+   (schedule, resolution, augmentation, anchors, focal/box loss, focal_alpha) topped
+   out at ~0.535. The one lever that moved it — **multi-layer feature fusion** — is an
+   architecture change. Single-layer ViT features were the binding constraint; fusing
+   L6/12/18/24 lifts mAP@50 +0.015 and mAP@50:95 to a DINOv3-best **0.321** in only 75ep.
+2. **C-RADIO's dominant lever is the schedule.** 150ep alone took it to **0.5931**
+   (+0.028), the closest any single model has come to 0.60. GIoU + Caries oversampling
+   add a smaller, orthogonal +0.003 on localization.
+3. **Anchor/loss is fully tapped on both backbones** — `cradio_s2` and `dinov3_falpha`
+   both regressed. No further budget goes there.
+
+### Round 4 returns — compound the confirmed winners (done)
+
+Nobody had combined the levers that *individually* won, so three finalize runs (all
+150ep, `register_winner=True`) compounded them:
+
+| Stage | Recipe | Run (version) | mAP@50 | 50:95 | Δ | Verdict |
+|-------|--------|---------------|--------|-------|---|---------|
+| `dinov3_final` | fusion + 150ep (smooth_l1) | `capricious-hound-240` (v7) | **0.5738** | 0.333 | **+0.023** vs fusion@75ep | **WIN — best DINOv3; fusion × schedule compound** |
+| `dinov3_final_giou` | fusion + 150ep + GIoU | `rebellious-gnu-395` (v8) | 0.5704 | **0.340** | −0.003 vs smooth_l1 | GIoU trades a hair of mAP@50 for the **best 50:95** |
+| `cradio_final` | 150ep + GIoU + Caries×2 | `resilient-moth-415` (v11) | 0.5697 | 0.288 | **−0.023** vs plain 150ep | **REGRESSED — GIoU+oversample hurt once the schedule was long** |
+
+**Findings:**
+
+1. **DINOv3 compounded cleanly.** The two confirmed wins *stack*: fusion (75ep → 0.5504)
+   × long schedule (→ **0.5738**). Net DINOv3 journey is **0.518 → 0.574 (+0.056, +11%
+   relative)**, with mAP@50:95 up to 0.333 (0.340 with GIoU) — fully past the old ~0.535
+   ceiling. DINOv3 now sits ~0.026 short of 0.60.
+2. **GIoU is a localization, not a detection, lever.** On DINOv3 it lifts 50:95 (0.333 →
+   0.340) while shaving mAP@50 (−0.003) — useful if box tightness matters, neutral for the
+   headline metric.
+3. **The C-RADIO compound *failed*.** GIoU + Caries×2 *helped* at 100ep (+0.003 vs s1) but
+   *hurt* at 150ep (0.5697 vs the plain-150ep 0.5931, −0.023). The extra regularization the
+   oversampling/GIoU impose collides with the long schedule's need to keep fitting. **Best
+   C-RADIO stays the plain `dazzling-mole-850` (0.5931).** C-RADIO's path to 0.60 is *more
+   schedule / resolution*, not more loss-side levers.
+
+### ⚠ Champion registration — the auto-`@candidate` aliases point at the wrong runs
+
+`register_winner=True` set `@candidate` on whatever registered **last**, which is *not* the
+best model on either backbone:
+
+| Model | `@champion` (now) | `@candidate` (now) | **Best run** | Action needed |
+|-------|-------------------|--------------------|--------------|---------------|
+| `cradio_detector` | v10 `upbeat-mink-783` (0.5219) | v11 `resilient-moth-415` (0.5697) | **`dazzling-mole-850` 0.5931 — UNREGISTERED** | register `dazzling-mole-850` → `@champion` |
+| `dinov3_detector` | v2 (old, **broken**) | v8 `rebellious-gnu-395` (0.5704) | **v7 `capricious-hound-240` 0.5738 (registered)** | set `@champion` → v7 |
+
+So promoting champions is **not** "alias the candidate": for C-RADIO the best model isn't
+registered at all (it was a Round-3 `register_winner=False` run), and for DINOv3 the best is
+v7, not the v8 the candidate alias landed on. Promotion plan: register `dazzling-mole-850`
+from its run as a new `cradio_detector` version and alias it `@champion`; set
+`dinov3_detector@champion` → v7. Then run `09b` on the two champions for the Caries AP@50 gate
++ free decode/NMS gains (this also retires the broken-DINOv3 issue below).
 
 ### ⚠ Registered DINOv3 serving model is broken
 

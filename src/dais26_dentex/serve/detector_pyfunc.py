@@ -95,6 +95,7 @@ def _build_detection_model(
     anchor_base_scale: float = 4.0,
     anchor_octaves: list[float] | None = None,
     nms_per_class: bool = False,
+    fusion_layers: list[int] | None = None,
 ) -> tuple[Any, Any]:
     """Build a `DetectionModel` and return ``(model, info)``.
 
@@ -115,6 +116,7 @@ def _build_detection_model(
         cache_dir=cache_dir,
         device=device,
         local_files_only=local_files_only,
+        fusion_layers=fusion_layers,
     )
     model = DetectionModel(
         backbone=backbone,
@@ -144,7 +146,18 @@ def _load_state_into(model: Any, state_path: str, device: str, *, keep_backbone:
     encoder and discard the fine-tune.
     """
     state = torch.load(state_path, map_location=device, weights_only=True)
-    load_state = state if keep_backbone else {k: v for k, v in state.items() if not k.startswith("backbone.")}
+    # The multi-layer fusion combiner lives under `backbone.fusion.*` but is a
+    # trainable head, not a pretrained encoder weight — always restore it, even
+    # when the rest of the backbone is re-fetched from HF (keep_backbone=False).
+    load_state = (
+        state
+        if keep_backbone
+        else {
+            k: v
+            for k, v in state.items()
+            if (not k.startswith("backbone.")) or k.startswith("backbone.fusion.")
+        }
+    )
     missing = model.load_state_dict(load_state, strict=False)
     logger.info(
         "Loaded state (keep_backbone=%s). Missing: %s, Unexpected: %s",
@@ -286,6 +299,7 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             anchor_base_scale=manifest.detector.anchor_base_scale,
             anchor_octaves=manifest.detector.anchor_octaves,
             nms_per_class=manifest.detector.nms_per_class,
+            fusion_layers=manifest.backbone.fusion_layers,
         )
         # full/partial fine-tune persisted backbone weights in the state dict;
         # restore them instead of keeping the pretrained HF encoder.

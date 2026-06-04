@@ -76,6 +76,11 @@ class BackboneSpec:
     # (all C-RADIO) keep reproducing their training-time preprocessing.
     image_mean: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_MEAN))
     image_std: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_STD))
+    # Multi-layer ViT feature-fusion depths (DINOv3 only). `None` (default) =
+    # last-layer-only, so pre-existing manifests load unchanged. When set, the
+    # serving loader must rebuild the fusion combiner so the saved
+    # `backbone.fusion.*` weights have a home to load into.
+    fusion_layers: list[int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

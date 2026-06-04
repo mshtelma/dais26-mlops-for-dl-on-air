@@ -10,7 +10,8 @@
 # MAGIC "push to 0.60" plan (docs/HPO.md) — run it first to bank any free mAP and to
 # MAGIC record the per-class **Caries AP@50** baseline that the campaign gates on.
 # MAGIC
-# MAGIC For each registered backbone (`@champion`/`@candidate`) this notebook:
+# MAGIC For each registered backbone (`@candidate` preferred, `@champion` fallback —
+# MAGIC champion is the post-tuning end-state; we grade the in-tuning candidate) this notebook:
 # MAGIC   1. loads the serving pyfunc once,
 # MAGIC   2. mutates the inner `DetectionModel`'s thresholds across a grid,
 # MAGIC   3. re-evaluates the held-out split with the same `evaluate_coco` the
@@ -50,7 +51,11 @@ mlflow.set_registry_uri("databricks-uc")
 
 EVAL_SPLIT = "val"          # held out of training; mirrors trainer validation
 PREDICT_CHUNK = 16
-ALIAS_PREFERENCE = ("champion", "candidate")
+# Grid the CANDIDATE first: during the push-to-0.60 tuning the freshly-registered
+# tuning winners live at @candidate, while @champion is the *post-tuning* end-state
+# (often stale/old or, for DINOv3, the known-broken v2). We want to grade what's
+# being tuned, so candidate takes precedence and champion is only a fallback.
+ALIAS_PREFERENCE = ("candidate", "champion")
 
 # Backbones to grid. Mirrors 09_eval_comparison.py.
 COMPARE_BACKBONES: dict[str, dict[str, str]] = {

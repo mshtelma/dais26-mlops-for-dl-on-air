@@ -1,0 +1,63 @@
+# UC registered models managed by the bundle.
+#
+# Two tiers, mirroring the Big Book "deploy code" dev/prod asset split and the
+# two-schema config in notebooks/00_config.py:
+#   * DEV detectors live in {CATALOG}.{SCHEMA} (mlops_pj.dais26_vfm). Training /
+#     the HPO sweep register new versions here and set @challenger; that
+#     registration auto-triggers the deployment job once connected (see
+#     resources/jobs/connect_deployment_job.yml + notebooks/13).
+#   * PROD champions live in {CHAMPION_CATALOG}.{CHAMPION_SCHEMA}
+#     (mlops_pj.dais26_vfm_prod). The promote task (notebooks/12) copies the
+#     approved dev version here (lineage preserved) and sets @champion.
+#
+# catalog_name / schema_name / name MUST stay in sync with the derived values in
+# notebooks/00_config.py (CATALOG, SCHEMA, CHAMPION_CATALOG, CHAMPION_SCHEMA, and
+# the backbone-keyed *_detector short names). Declaring the models here lets the
+# bundle own their grants and gives connect_deployment_job.py a stable target to
+# attach the deployment job to. Training's log_model(registered_model_name=...)
+# registers versions under the same name; a pre-existing DAB-managed model is fine.
+#
+# Grants target the prod service principal (var.sp_app_id). On dev that var is
+# empty and the deploying user owns the models; set sp_app_id for prod so the SP
+# can EXECUTE the dev detectors (copy source) and the promote/deploy path works.
+resources:
+  registered_models:
+    cradio_detector_dev:
+      name: cradio_detector
+      catalog_name: mlops_pj
+      schema_name: dais26_vfm
+      comment: "DEV C-RADIOv4 detector; new versions get @challenger and auto-trigger the deployment job."
+      grants:
+        - principal: "${var.sp_app_id}"
+          privileges:
+            - EXECUTE
+
+    dinov3_detector_dev:
+      name: dinov3_detector
+      catalog_name: mlops_pj
+      schema_name: dais26_vfm
+      comment: "DEV DINOv3 detector; new versions get @challenger and auto-trigger the deployment job."
+      grants:
+        - principal: "${var.sp_app_id}"
+          privileges:
+            - EXECUTE
+
+    cradio_detector_champion:
+      name: cradio_detector
+      catalog_name: mlops_pj
+      schema_name: dais26_vfm_prod
+      comment: "PROD C-RADIOv4 champion; lineage-preserving copy of the approved dev version, alias @champion."
+      grants:
+        - principal: "${var.sp_app_id}"
+          privileges:
+            - EXECUTE
+
+    dinov3_detector_champion:
+      name: dinov3_detector
+      catalog_name: mlops_pj
+      schema_name: dais26_vfm_prod
+      comment: "PROD DINOv3 champion; lineage-preserving copy of the approved dev version, alias @champion."
+      grants:
+        - principal: "${var.sp_app_id}"
+          privileges:
+            - EXECUTE

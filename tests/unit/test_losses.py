@@ -12,9 +12,13 @@ from __future__ import annotations
 
 import torch
 
+import pytest
+
 from dais26_dentex.train.losses import (
+    _giou_elementwise,
     detection_loss,
     focal_classification_loss,
+    giou_box_loss,
     smooth_l1_box_loss,
 )
 
@@ -176,3 +180,83 @@ def test_detection_loss_weighting() -> None:
     )
     delta = out_2["loss"].item() - out_1["loss"].item()
     assert abs(delta - out_1["box_loss"].item()) < 1e-6
+
+
+# --- GIoU box loss (Track B) ----------------------------------------------
+
+
+def test_giou_elementwise_identical_boxes_is_one() -> None:
+    """GIoU of a box with itself is exactly 1.0."""
+    boxes = torch.tensor([[0.0, 0.0, 10.0, 10.0], [5.0, 5.0, 7.0, 9.0]])
+    giou = _giou_elementwise(boxes, boxes)
+    assert torch.allclose(giou, torch.ones(2), atol=1e-5)
+
+
+def test_giou_elementwise_disjoint_boxes_is_negative() -> None:
+    """Far-apart boxes: IoU=0 and the enclosing-box penalty drives GIoU negative."""
+    a = torch.tensor([[0.0, 0.0, 1.0, 1.0]])
+    b = torch.tensor([[100.0, 100.0, 101.0, 101.0]])
+    giou = _giou_elementwise(a, b)
+    assert giou.item() < 0.0
+
+
+def test_giou_box_loss_zero_when_prediction_exact() -> None:
+    """Zero deltas decode to the anchor; identical pred/target → ~0 loss."""
+    anchors = torch.tensor([[0.0, 0.0, 10.0, 10.0], [20.0, 20.0, 40.0, 40.0]])
+    box_pred = torch.zeros(1, 2, 4)
+    box_targets = torch.zeros(1, 2, 4)
+    fg_mask = torch.tensor([[True, True]])
+    loss = giou_box_loss(box_pred, box_targets, anchors, fg_mask)
+    assert loss.item() == pytest.approx(0.0, abs=1e-5)
+
+
+def test_giou_box_loss_zero_when_no_positives_keeps_graph() -> None:
+    anchors = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
+    box_pred = torch.randn(1, 1, 4, requires_grad=True)
+    box_targets = torch.zeros(1, 1, 4)
+    fg_mask = torch.zeros(1, 1, dtype=torch.bool)
+    loss = giou_box_loss(box_pred, box_targets, anchors, fg_mask)
+    assert loss.item() == 0.0
+    assert loss.requires_grad
+
+
+def test_detection_loss_giou_requires_anchors() -> None:
+    """box_loss_type='giou' without anchors is a hard error, not a silent fallback."""
+    cls_logits = torch.zeros(1, 1, 2)
+    cls_targets = torch.zeros(1, 1, 2)
+    box_pred = torch.zeros(1, 1, 4)
+    box_targets = torch.zeros(1, 1, 4)
+    fg_mask = torch.tensor([[True]])
+    ignore_mask = torch.zeros(1, 1, dtype=torch.bool)
+    with pytest.raises(ValueError, match="requires `anchors`"):
+        detection_loss(
+            cls_logits=cls_logits,
+            box_pred=box_pred,
+            cls_targets=cls_targets,
+            box_targets=box_targets,
+            fg_mask=fg_mask,
+            ignore_mask=ignore_mask,
+            box_loss_type="giou",
+        )
+
+
+def test_detection_loss_giou_runs_with_anchors() -> None:
+    anchors = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
+    cls_logits = torch.full((1, 1, 2), -10.0)
+    cls_targets = torch.zeros(1, 1, 2)
+    box_pred = torch.tensor([[[0.5, 0.5, 0.2, 0.2]]])  # decode to a shifted/scaled box
+    box_targets = torch.zeros(1, 1, 4)
+    fg_mask = torch.tensor([[True]])
+    ignore_mask = torch.zeros(1, 1, dtype=torch.bool)
+    out = detection_loss(
+        cls_logits=cls_logits,
+        box_pred=box_pred,
+        cls_targets=cls_targets,
+        box_targets=box_targets,
+        fg_mask=fg_mask,
+        ignore_mask=ignore_mask,
+        box_loss_type="giou",
+        anchors=anchors,
+    )
+    assert torch.isfinite(out["loss"])
+    assert out["box_loss"].item() > 0.0

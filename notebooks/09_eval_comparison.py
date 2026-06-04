@@ -30,36 +30,33 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
-import base64
 import gc
-import json
-import tempfile
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import mlflow
 import pandas as pd
 import torch
 
-from dais26_dentex.data.dentex_loader import get_label_map, load_canonical_split
-from dais26_dentex.eval.coco_metrics import evaluate_coco, format_predictions_for_coco
+from dais26_dentex.eval.runner import build_name_to_category_id, score_model_on_split
 
 mlflow.set_registry_uri("databricks-uc")
 
-# Split to evaluate on. `val` mirrors what the trainer validated on (50 imgs);
-# switch to `test` (250 imgs) for the larger held-out generalization measure.
-# Both are held out of training, so either is a fair comparison surface.
-EVAL_SPLIT = "val"
+# Splits to evaluate on. `val` (50 imgs) is the selection surface the trainer
+# validated on; `test` (250 imgs) is the larger held-out generalization /
+# publication surface. Both are held out of training. The shared eval path lives
+# in `dais26_dentex.eval.runner` (also used by the deployment-job eval task,
+# notebooks/10) so this comparison and the promotion gate score identically.
+EVAL_SPLITS = ["val", "test"]
 
 # Per-image prediction chunk — the pyfunc forwards one image at a time
 # internally, so this only bounds how many rows we build into a DataFrame at
 # once (keeps memory flat + gives progress output).
 PREDICT_CHUNK = 16
 
-# Alias to evaluate, in preference order. The deploy task promotes @candidate ->
-# @champion after a passing smoke test; fall back to @candidate so a backbone
-# that's trained but not yet deployed still participates.
-ALIAS_PREFERENCE = ("champion", "candidate")
+# Alias to evaluate, in preference order. The deployment job promotes the dev
+# @challenger -> prod @champion after eval + approval; fall back to @challenger
+# so a backbone that's trained but not yet promoted still participates.
+ALIAS_PREFERENCE = ("champion", "challenger")
 
 # Backbones to compare. Keys are the `params.backbone_name` literal; `model_short`
 # mirrors the per-backbone registered-model name derived in 00_config.py.
@@ -70,54 +67,13 @@ COMPARE_BACKBONES: dict[str, dict[str, str]] = {
 
 # Inverse of the canonical label map: predicted class *names* (what the pyfunc
 # returns) -> integer category_id (what COCO scoring expects).
-LABEL_MAP = get_label_map()  # {0: "Caries", ...}
-NAME_TO_ID = {v: k for k, v in LABEL_MAP.items()}
+NAME_TO_ID = build_name_to_category_id()
 
-
-def _to_category_id(name: object) -> int:
-    """Map a predicted class *name* -> integer category_id.
-
-    The pyfunc returns class names (e.g. "Caries"); COCO scoring wants the
-    integer id. Fall back to int() only for the (defensive) case of a numeric
-    label — done as an explicit branch, NOT a dict-get default, since the
-    default expression `int(name)` would be evaluated eagerly even for known
-    names and raise on "Caries".
-    """
-    key = str(name)
-    if key in NAME_TO_ID:
-        return NAME_TO_ID[key]
-    return int(key)
-
-print(f"EVAL_SPLIT = {EVAL_SPLIT}")
+print(f"EVAL_SPLITS = {EVAL_SPLITS}")
 print(f"Catalog/schema = {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
-# ---- Materialize a normalized COCO ground-truth file for pycocotools ----
-# `evaluate_coco` reads the GT path directly via pycocotools.COCO, so we write a
-# fresh JSON from `load_canonical_split` (which normalizes DENTEX's hierarchical
-# category_id_3 -> our flat category_id in memory). We also backfill `area` /
-# `iscrowd` if missing, since COCOeval's area-range buckets need them.
-coco_gt = load_canonical_split(VOLUME_PATH, EVAL_SPLIT)
-for ann in coco_gt["annotations"]:
-    if "area" not in ann:
-        x, y, w, h = ann["bbox"]
-        ann["area"] = float(w) * float(h)
-    ann.setdefault("iscrowd", 0)
-
-_gt_tmp = tempfile.NamedTemporaryFile("w", suffix=f"_{EVAL_SPLIT}_gt.json", delete=False)
-json.dump(coco_gt, _gt_tmp)
-_gt_tmp.close()
-GT_PATH = _gt_tmp.name
-
-images_dir = Path(VOLUME_PATH) / "images" / EVAL_SPLIT
-print(
-    f"GT: {len(coco_gt['images'])} images, {len(coco_gt['annotations'])} annotations "
-    f"-> {GT_PATH}"
-)
-print(f"Images dir: {images_dir}")
-
-# COMMAND ----------
-# ---- Per-backbone evaluation ----
+# ---- Per-backbone, per-split evaluation ----
 
 
 def _load_detector(model_short: str):
@@ -128,42 +84,13 @@ def _load_detector(model_short: str):
         try:
             model = mlflow.pyfunc.load_model(uri)
             return model, uri
-        except Exception as e:  # noqa: BLE001 — any resolve/load failure -> try next alias
+        except Exception as e:
             print(f"  {uri}: unavailable ({type(e).__name__})")
     return None, None
 
 
-def _b64(path: Path) -> str:
-    return base64.b64encode(path.read_bytes()).decode("ascii")
-
-
-def _predict_split(model) -> list[dict]:
-    """Run the pyfunc over every image in the split; return COCO model_output.
-
-    Each element: {image_id, boxes (N,4 xyxy px), scores (N,), labels (N, int)}.
-    Predicted label *names* are mapped back to integer category_ids.
-    """
-    items = [(img["id"], images_dir / img["file_name"]) for img in coco_gt["images"]]
-    model_output: list[dict] = []
-    for start in range(0, len(items), PREDICT_CHUNK):
-        chunk = items[start : start + PREDICT_CHUNK]
-        df_in = pd.DataFrame({"image": [_b64(p) for _, p in chunk]})
-        preds = model.predict(df_in).reset_index(drop=True)
-        for (image_id, _), (_, row) in zip(chunk, preds.iterrows(), strict=True):
-            labels = [_to_category_id(name) for name in row["labels"]]
-            model_output.append(
-                {
-                    "image_id": int(image_id),
-                    "boxes": torch.tensor(row["boxes"], dtype=torch.float32).reshape(-1, 4),
-                    "scores": torch.tensor(row["scores"], dtype=torch.float32).reshape(-1),
-                    "labels": torch.tensor(labels, dtype=torch.long).reshape(-1),
-                }
-            )
-        print(f"    predicted {min(start + PREDICT_CHUNK, len(items))}/{len(items)}")
-    return model_output
-
-
-results: dict[str, dict] = {}
+# results[split][backbone] = metrics dict from score_model_on_split.
+results: dict[str, dict[str, dict]] = {split: {} for split in EVAL_SPLITS}
 for backbone, cfg in COMPARE_BACKBONES.items():
     print(f"\n=== {backbone} ({cfg['model_short']}) ===")
     model, uri = _load_detector(cfg["model_short"])
@@ -172,72 +99,75 @@ for backbone, cfg in COMPARE_BACKBONES.items():
         continue
     print(f"  loaded {uri}")
 
-    model_output = _predict_split(model)
-    coco_preds = format_predictions_for_coco(model_output)
-    metrics = evaluate_coco(coco_preds, GT_PATH)
-    metrics["_uri"] = uri
-    metrics["_num_predictions"] = len(coco_preds)
-    results[backbone] = metrics
+    for split in EVAL_SPLITS:
+        print(f"  scoring on '{split}'...")
+        metrics = score_model_on_split(
+            model, VOLUME_PATH, split, name_to_id=NAME_TO_ID, predict_chunk=PREDICT_CHUNK
+        )
+        metrics["_uri"] = uri
+        results[split][backbone] = metrics
 
     # Free VRAM before loading the next backbone.
-    del model, model_output, coco_preds
+    del model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-if not results:
+if not any(results[split] for split in EVAL_SPLITS):
     raise RuntimeError(
         "No detectors could be loaded. Train + register at least one backbone "
         "(02_train_detector_air.py / the sgcli workloads) first."
     )
 
 # COMMAND ----------
-# ---- Side-by-side comparison table ----
+# ---- Side-by-side comparison tables (one per split) ----
 OVERALL_COLS = ["mAP_50", "mAP_50_95", "mAP_75", "AR_1", "AR_10", "AR_100"]
 
-comparison_df = pd.DataFrame(
-    {
-        backbone: {
-            **{c: round(m[c], 4) for c in OVERALL_COLS},
-            "num_predictions": m["_num_predictions"],
+for split in EVAL_SPLITS:
+    split_results = results[split]
+    if not split_results:
+        continue
+    comparison_df = pd.DataFrame(
+        {
+            backbone: {
+                **{c: round(m[c], 4) for c in OVERALL_COLS},
+                "num_predictions": m["num_predictions"],
+            }
+            for backbone, m in split_results.items()
         }
-        for backbone, m in results.items()
-    }
-).T
-comparison_df.index.name = "backbone"
-print(f"\n=== Eval comparison on '{EVAL_SPLIT}' split ({len(coco_gt['images'])} images) ===")
-display(comparison_df)  # noqa: F821  (Databricks builtin)
+    ).T
+    comparison_df.index.name = "backbone"
+    print(f"\n=== Eval comparison on '{split}' split ===")
+    display(comparison_df)
+
+    per_class_df = pd.DataFrame(
+        {backbone: m["per_class_AP50"] for backbone, m in split_results.items()}
+    ).T.round(4)
+    per_class_df.index.name = "backbone"
+    print(f"=== Per-class AP@50 ('{split}') ===")
+    display(per_class_df)
 
 # COMMAND ----------
-# ---- Per-class AP50 breakdown ----
-per_class_df = pd.DataFrame(
-    {backbone: m["per_class_AP50"] for backbone, m in results.items()}
-).T.round(4)
-per_class_df.index.name = "backbone"
-print("\n=== Per-class AP@50 ===")
-display(per_class_df)  # noqa: F821  (Databricks builtin)
+# ---- Bar chart of mAP_50 per split + winner ----
+for split in EVAL_SPLITS:
+    split_results = results[split]
+    if not split_results:
+        continue
+    chart = pd.Series({b: float(m["mAP_50"]) for b, m in split_results.items()})
+    fig, ax = plt.subplots(figsize=(6, 4))
+    chart.plot(kind="bar", ax=ax, color=["#1f77b4", "#ff7f0e"][: len(chart)])
+    ax.set_ylabel("mAP_50")
+    ax.set_title(f"Detector mAP_50 by backbone (re-eval on '{split}')")
+    ax.set_ylim(0, max(0.01, chart.max() * 1.15))
+    for i, v in enumerate(chart.values):
+        ax.text(i, v, f"{v:.3f}", ha="center", va="bottom")
+    plt.xticks(rotation=15)
+    plt.tight_layout()
+    plt.show()
 
-# COMMAND ----------
-# ---- Bar chart of mAP_50 + winner ----
-chart = comparison_df["mAP_50"].astype(float)
-fig, ax = plt.subplots(figsize=(6, 4))
-chart.plot(kind="bar", ax=ax, color=["#1f77b4", "#ff7f0e"][: len(chart)])
-ax.set_ylabel("mAP_50")
-ax.set_title(f"Detector mAP_50 by backbone (re-eval on '{EVAL_SPLIT}')")
-ax.set_ylim(0, max(0.01, chart.max() * 1.15))
-for i, v in enumerate(chart.values):
-    ax.text(i, v, f"{v:.3f}", ha="center", va="bottom")
-plt.xticks(rotation=15)
-plt.tight_layout()
-plt.show()
-
-winner = chart.idxmax()
-print(f"\nWINNER (highest mAP_50 on '{EVAL_SPLIT}'): {winner} = {chart.max():.4f}")
-if len(chart) > 1:
-    runner_up = chart.drop(winner).idxmax()
-    delta = chart[winner] - chart[runner_up]
-    print(f"  beats {runner_up} ({chart[runner_up]:.4f}) by {delta:+.4f} mAP_50")
-
-# COMMAND ----------
-# Clean up the temp GT file.
-Path(GT_PATH).unlink(missing_ok=True)
+    winner = chart.idxmax()
+    print(f"\nWINNER (highest mAP_50 on '{split}'): {winner} = {chart.max():.4f}")
+    if len(chart) > 1:
+        runner_up = chart.drop(winner).idxmax()
+        delta = chart[winner] - chart[runner_up]
+        print(f"  beats {runner_up} ({chart[runner_up]:.4f}) by {delta:+.4f} mAP_50")

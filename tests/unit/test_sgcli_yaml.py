@@ -88,15 +88,19 @@ def test_requirements_lists_dependencies():
 
 
 def test_mlflow_pin_matches_pyproject():
-    """requirements.yaml `mlflow>=X,<Y` must not conflict with pyproject's pin."""
+    """requirements.yaml `mlflow>=X` must not conflict with pyproject's pin.
+
+    Bumped to MLflow 3 for deployment jobs + logging metrics to model versions
+    (LoggedModel); both files now pin `mlflow>=3.1`.
+    """
     req = _load(REQS)
     mlflow_specs = [s for s in req["dependencies"] if isinstance(s, str) and "mlflow" in s]
     assert mlflow_specs, "no mlflow dependency in requirements.yaml"
     pyproject_text = PYPROJECT.read_text()
-    # Both should constrain mlflow to >=2.18 and <3.0 (no major version split).
+    # Both should require MLflow 3 (no major-version split between the two files).
     for spec in mlflow_specs:
-        assert ">=2.18" in spec or "<3.0" in spec, f"mlflow pin {spec!r} drifts from pyproject (>=2.18.0,<3.0)"
-    assert "mlflow>=2.18.0,<3.0" in pyproject_text
+        assert ">=3.1" in spec, f"mlflow pin {spec!r} drifts from pyproject (>=3.1)"
+    assert "mlflow>=3.1" in pyproject_text
 
 
 def test_requirements_includes_pyyaml():

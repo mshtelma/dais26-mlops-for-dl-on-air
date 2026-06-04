@@ -6,6 +6,7 @@ import pytest
 
 from dais26_dentex.train.sweep import (
     TrialResult,
+    beats_experiment_best,
     grid_size,
     iter_trials,
     select_best,
@@ -104,3 +105,37 @@ def test_select_best_all_failed_returns_none() -> None:
     results = [TrialResult(0, {}, metric=None), TrialResult(1, {}, metric=None)]
     assert select_best(results) is None
     assert select_best([]) is None
+
+
+# --- beats_experiment_best (challenger registration gate) --------------------
+
+
+def test_beats_experiment_best_no_prior_versions_passes() -> None:
+    # First measurable version: nothing to beat -> becomes the challenger.
+    assert beats_experiment_best(0.42, []) is True
+    assert beats_experiment_best(0.0, [None, None]) is True
+
+
+def test_beats_experiment_best_strictly_greater_passes() -> None:
+    assert beats_experiment_best(0.50, [0.30, 0.49, None]) is True
+
+
+def test_beats_experiment_best_tie_does_not_pass() -> None:
+    # An equal challenger does NOT displace the incumbent.
+    assert beats_experiment_best(0.49, [0.30, 0.49]) is False
+
+
+def test_beats_experiment_best_worse_does_not_pass() -> None:
+    assert beats_experiment_best(0.40, [0.55]) is False
+
+
+def test_beats_experiment_best_none_candidate_never_passes() -> None:
+    assert beats_experiment_best(None, []) is False
+    assert beats_experiment_best(None, [0.1]) is False
+
+
+def test_beats_experiment_best_lower_is_better() -> None:
+    # e.g. a loss metric: strictly lower than the min existing wins.
+    assert beats_experiment_best(0.10, [0.20, 0.15], higher_is_better=False) is True
+    assert beats_experiment_best(0.15, [0.20, 0.15], higher_is_better=False) is False
+    assert beats_experiment_best(0.30, [0.20], higher_is_better=False) is False

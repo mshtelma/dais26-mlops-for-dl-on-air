@@ -40,7 +40,12 @@ from torch.utils.data import DataLoader
 from dais26_dentex.config.constants import MANIFEST_FILE, MODEL_STATE_FILE
 from dais26_dentex.config.manifest import BackboneSpec, DetectorSpec, Manifest
 from dais26_dentex.config.trainer_config import TrainerConfig
-from dais26_dentex.data.dataset import DENTEXDetectionDataset, detection_collate
+from dais26_dentex.data.dataset import (
+    DENTEXDetectionDataset,
+    IndexRemapDataset,
+    build_caries_oversampled_indices,
+    detection_collate,
+)
 from dais26_dentex.data.dentex_loader import get_label_map
 from dais26_dentex.data.transforms import get_train_transforms, get_val_transforms
 from dais26_dentex.distributed.primitives import (
@@ -151,13 +156,19 @@ class Trainer:
         DDP prefixes names with ``module.``; the backbone subtree is the only
         one whose qualified name contains ``backbone``, so a substring test is
         robust to the wrap. Frozen params are excluded.
+
+        The multi-layer fusion combiner (``...backbone.fusion.*``) is a small
+        learnable head bolted onto the encoder, not pretrained weights — it is
+        routed to the *head* LR group so it can actually learn, instead of
+        crawling at the tiny discriminative ``backbone_lr``.
         """
         backbone_params: list[torch.nn.Parameter] = []
         head_params: list[torch.nn.Parameter] = []
         for name, p in model.named_parameters():
             if not p.requires_grad:
                 continue
-            (backbone_params if "backbone" in name else head_params).append(p)
+            is_backbone = "backbone" in name and "fusion" not in name
+            (backbone_params if is_backbone else head_params).append(p)
         return backbone_params, head_params
 
     def _build_loaders(
@@ -191,9 +202,26 @@ class Trainer:
             split="val",
             transforms=get_val_transforms(cfg.img_size, mean=mean, std=std),
         )
-        train_sampler = maybe_distributed_sampler(train_ds, shuffle=True)
+        # Class-balanced oversampling of Caries-bearing images (id 0): replicate
+        # their indices so the binding Caries AP@50 gate sees more positives per
+        # epoch. Index replication (not WeightedRandomSampler) keeps it DDP-safe
+        # — DistributedSampler just shards a longer flat index list. Val is never
+        # oversampled.
+        train_dataset: object = train_ds
+        if cfg.caries_oversample > 1.0:
+            expanded = build_caries_oversampled_indices(
+                train_ds.per_image_label_sets(), cfg.caries_oversample, positive_class=0
+            )
+            train_dataset = IndexRemapDataset(train_ds, expanded)
+            logger.info(
+                "Caries oversampling x%.2f: train samples %d -> %d",
+                cfg.caries_oversample,
+                len(train_ds),
+                len(expanded),
+            )
+        train_sampler = maybe_distributed_sampler(train_dataset, shuffle=True)
         train_loader = DataLoader(
-            train_ds,
+            train_dataset,
             batch_size=cfg.batch_size,
             shuffle=(train_sampler is None),
             sampler=train_sampler,
@@ -272,6 +300,8 @@ class Trainer:
                     focal_alpha=cfg.focal_alpha,
                     focal_gamma=cfg.focal_gamma,
                     box_weight=cfg.box_loss_weight,
+                    box_loss_type=cfg.box_loss_type,
+                    anchors=anchors,
                 )
                 loss = losses["loss"]
 
@@ -421,6 +451,7 @@ class Trainer:
                 trained_mode=mode,
                 image_mean=list(info.image_mean),
                 image_std=list(info.image_std),
+                fusion_layers=list(cfg.fusion_layers) if cfg.fusion_layers is not None else None,
             ),
             detector=DetectorSpec(
                 num_classes=self.num_classes,
@@ -565,6 +596,7 @@ class Trainer:
                         }
                     )
                     mlflow.log_params(params)
+                    self._log_dataset_lineage()
 
                 if train_loader is not None:
                     # One scheduler step per optimizer step. With gradient
@@ -687,6 +719,41 @@ class Trainer:
                 "GradScaler skipping every step). Check train/grad_norm and train/amp_scale; "
                 "try amp_dtype=bf16 or fp32. Aborting to save GPU budget."
             )
+
+    def _log_dataset_lineage(self) -> None:
+        """Log the DENTEX train split as an MLflow dataset input (rank-0 only).
+
+        Surfaces the training data on the model version's Lineage tab. The source
+        is the canonical COCO annotation file in the UC Volume; the digest comes
+        from a small per-split summary frame. Best-effort: any failure (offline
+        unit env, missing annotations) is logged and swallowed so it never breaks
+        a training run.
+        """
+        cfg = self.cfg
+        if cfg.volume_path is None:
+            return
+        try:
+            import pandas as pd
+
+            from dais26_dentex.data.dentex_loader import load_canonical_split
+
+            train = load_canonical_split(cfg.volume_path, "train")
+            summary = pd.DataFrame(
+                {
+                    "split": ["train"],
+                    "num_images": [len(train.get("images", []))],
+                    "num_annotations": [len(train.get("annotations", []))],
+                }
+            )
+            dataset = mlflow.data.from_pandas(
+                summary,
+                source=f"{cfg.volume_path}/annotations/train.json",
+                name="DENTEX-train",
+            )
+            mlflow.log_input(dataset, context="training")
+            logger.info("Logged DENTEX-train dataset lineage (%s images)", summary["num_images"][0])
+        except Exception as e:
+            logger.warning("Dataset lineage logging skipped: %s", e)
 
     def _safe_barrier_or_skip(self) -> None:
         """Pre-save sync that surfaces dead-rank deadlocks as typed errors.

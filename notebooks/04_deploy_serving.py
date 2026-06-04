@@ -2,9 +2,12 @@
 # MAGIC %md
 # MAGIC # 04 — Deploy Serving (SDK-driven)
 # MAGIC Two modes:
-# MAGIC - `register_and_set_candidate`: verifies the trained model is registered + has `@candidate`
-# MAGIC - `deploy_and_smoke_test`: resolves `@candidate` to numeric, deploys endpoint via SDK,
+# MAGIC - `register_and_set_candidate`: verifies the trained model is registered + has `@challenger`
+# MAGIC - `deploy_and_smoke_test`: resolves `@challenger` to numeric, deploys endpoint via SDK,
 # MAGIC   runs smoke test, promotes to `@champion`. Uses create_and_wait / update_config_and_wait.
+# MAGIC
+# MAGIC This is the break-glass / manual deploy path; the primary promotion route is
+# MAGIC the `deploy_job_detector` deployment job (eval -> approval -> cross-schema promote).
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -26,17 +29,20 @@ print(f"Endpoint: {DETECTOR_ENDPOINT_NAME}")
 # COMMAND ----------
 
 if DEPLOY_ACTION == "register_and_set_candidate":
-    # The training task already registers + sets @candidate; verify it.
+    # The training task already registers + sets @challenger; verify it.
     import mlflow
     from mlflow.tracking import MlflowClient
+
+    from dais26_dentex.config.constants import ALIAS_CANDIDATE
+
     mlflow.set_registry_uri("databricks-uc")
     client = MlflowClient(registry_uri="databricks-uc")
     try:
-        mv = client.get_model_version_by_alias(name=full_model, alias="candidate")
-        print(f"@candidate -> version {mv.version}")
+        mv = client.get_model_version_by_alias(name=full_model, alias=ALIAS_CANDIDATE)
+        print(f"@{ALIAS_CANDIDATE} -> version {mv.version}")
     except Exception as e:
         raise RuntimeError(
-            f"No @candidate alias on {full_model}; training task may have failed: {e}"
+            f"No @{ALIAS_CANDIDATE} alias on {full_model}; training task may have failed: {e}"
         ) from e
     dbutils.notebook.exit("ok")
 

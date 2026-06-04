@@ -14,6 +14,15 @@ SCHEMA = "dais26_vfm"
 BACKBONE = "cradio_v4_so400m"
 BACKBONE_REVISION = "main"
 
+# ---- Prod / champion schema (Big Book "deploy code" dev/prod asset split) ----
+# Dev models (with @challenger) live in CATALOG.SCHEMA; the promote task copies
+# the approved version into a SEPARATE prod/broad schema and registers it as
+# @champion there (lineage back to the source run is preserved via
+# MlflowClient.copy_model_version). Same catalog by default; can become a
+# separate catalog later without touching the rest of the code.
+CHAMPION_CATALOG = "mlops_pj"
+CHAMPION_SCHEMA = "dais26_vfm_prod"
+
 # Table-name prefix so multiple DAIS26 projects can share one schema without colliding.
 TABLE_PREFIX = "dais26_dentex_"
 
@@ -67,6 +76,11 @@ DETECTOR_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{DETECTOR_MODEL_SHORT}"
 DETECTOR_LORA_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{DETECTOR_LORA_MODEL_SHORT}"
 EMBEDDER_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{EMBEDDER_MODEL_SHORT}"
 
+# Prod-schema champion model (same backbone-aware short name, prod schema). The
+# deploy job's promote task does copy_model_version(DETECTOR_MODEL_NAME ->
+# CHAMPION_MODEL_NAME) and sets @champion here.
+CHAMPION_MODEL_NAME = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{DETECTOR_MODEL_SHORT}"
+
 # COMMAND ----------
 # ---- Serving + Vector Search names ----
 DETECTOR_ENDPOINT_NAME = _detector_names["endpoint"]
@@ -80,10 +94,18 @@ VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}embeddings_index"
 # Use the dbutils notebook context (no spark — AIR workers don't have spark, and
 # the driver's spark.sql round-trip is unnecessary when dbutils gives us the
 # username directly).
+#
+# Point at the BUNDLE-MANAGED experiment (resources/experiments/vfm_experiment.yml,
+# name "/Users/${workspace.current_user.userName}/dais26_vfm_experiment") so every
+# training run, the HPO sweep, and the lineage-preserving champion copy all share
+# one experiment root that the DAB owns. Keeping the literal in sync with the YAML
+# means the deployment job's best-in-experiment gate (notebooks/10) reads the same
+# experiment the trainer logs to. (Still per-user today; when prod runs as the SP,
+# repoint both this and the YAML at a shared project-folder experiment.)
 _current_user = (
     dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
 )
-EXPERIMENT_NAME = f"/Users/{_current_user}/dais26-detector"
+EXPERIMENT_NAME = f"/Users/{_current_user}/dais26_vfm_experiment"
 
 # COMMAND ----------
 # ---- Backbone literals (canonical internal names for dais26_dentex.models.backbones) ----
@@ -324,6 +346,27 @@ CAMPAIGN_STAGES: dict[str, dict] = {
         },
         "search_space": {"focal_alpha": [0.25, 0.5, 0.75]},
     },
+    "dinov3_fusion": {  # Track B step-change: multi-layer ViT feature fusion (ViT-Det style)
+        # The headline architectural lever for DINOv3 — fuse hidden states
+        # L6/12/18/24 into the FPN instead of last-layer-only. Pinned on the
+        # victorious-goose-410 base so the ONLY change vs that run is fusion;
+        # clean attribution of any gain past the ~0.53 ceiling.
+        "backbone": "dinov3_vitl16",
+        "trial_epochs": 10,
+        "schedule_epochs": [75],
+        "max_trials": 1,
+        "register_winner": False,
+        "pinned": {
+            "backbone_mode": "full", "backbone_lr": 1e-5, "weight_decay": 1e-2,
+            "anchor_layout": "per_level", "anchor_base_scale": 4.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 2, "grad_accum_steps": 2,
+            "img_size": 1280, "lr": 2e-4, "onecycle_pct_start": 0.1,
+            "focal_gamma": 2.0, "box_loss_weight": 1.0,
+            "aug_multiscale_range": [0.7, 1.0], "aug_rotation_deg": 7.0, "aug_jitter_scale": 1.5,
+            "fusion_layers": [6, 12, 18, 24],
+        },
+        "search_space": {"base_seed": [42]},
+    },
     # ===== Campaign 2 — C-RADIO (fp16; fix = extend schedule + raise resolution) =====
     "cradio_s1": {  # schedule x resolution (+ mild aug: DINOv3 proved no-aug long runs overfit)
         "backbone": "cradio_v4_so400m",
@@ -423,6 +466,84 @@ CAMPAIGN_STAGES: dict[str, dict] = {
         },
         "search_space": {"base_seed": [42]},
     },
+    "cradio_giou": {  # Track B for C-RADIO: GIoU box loss + Caries oversampling (no fusion)
+        # C-RADIO can't fuse (custom HF model), but the backbone-agnostic Track B
+        # levers apply: GIoU localization loss + 2x Caries oversampling, pinned on
+        # the useful-mare-854 winner. Pushes C-RADIO further while DINOv3 fuses.
+        "backbone": "cradio_v4_so400m",
+        "trial_epochs": 10,
+        "schedule_epochs": [100],
+        "max_trials": 1,
+        "register_winner": False,
+        "pinned": {
+            "backbone_mode": "full", "backbone_lr": 1e-5, "weight_decay": 1e-2,
+            "anchor_layout": "per_level", "anchor_base_scale": 3.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 4, "grad_accum_steps": 2,
+            "img_size": 1024, "lr": 2e-4, "onecycle_pct_start": 0.2,
+            "focal_gamma": 2.5, "focal_alpha": 0.25, "box_loss_weight": 1.0,
+            "aug_multiscale_range": [0.8, 1.0], "aug_rotation_deg": 5.0, "aug_jitter_scale": 1.5,
+            "box_loss_type": "giou", "caries_oversample": 2.0,
+        },
+        "search_space": {"base_seed": [42]},
+    },
+    # ===== Finalize — compound the confirmed winners, register @candidate =====
+    # Results so far (val mAP@50): C-RADIO 150ep=0.5931 (schedule is the lever),
+    # C-RADIO giou+cov@100ep=0.5674 (50:95 ↑), DINOv3 fusion@75ep=0.5504 (broke
+    # the ceiling). Nobody combined the winners — these stages do.
+    "cradio_final": {  # C-RADIO: 150ep schedule winner + GIoU + Caries x2, registered
+        "backbone": "cradio_v4_so400m",
+        "trial_epochs": 10,
+        "schedule_epochs": [150],
+        "max_trials": 1,
+        "register_winner": True,
+        "pinned": {
+            "backbone_mode": "full", "backbone_lr": 1e-5, "weight_decay": 1e-2,
+            "anchor_layout": "per_level", "anchor_base_scale": 3.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 4, "grad_accum_steps": 2,
+            "img_size": 1024, "lr": 2e-4, "onecycle_pct_start": 0.2,
+            "focal_gamma": 2.5, "focal_alpha": 0.25, "box_loss_weight": 1.0,
+            "aug_multiscale_range": [0.8, 1.0], "aug_rotation_deg": 5.0, "aug_jitter_scale": 1.5,
+            "box_loss_type": "giou", "caries_oversample": 2.0,
+        },
+        "search_space": {"base_seed": [42]},
+    },
+    "dinov3_final": {  # DINOv3: fusion + 150ep (clean compound of the two confirmed winners)
+        # Highest-confidence DINOv3 final: fusion (the only lever that broke the
+        # ceiling) + the long schedule that gave C-RADIO +0.028. Keeps smooth_l1
+        # (proven for the fusion run) so this is a clean extension, not a gamble.
+        "backbone": "dinov3_vitl16",
+        "trial_epochs": 10,
+        "schedule_epochs": [150],
+        "max_trials": 1,
+        "register_winner": True,
+        "pinned": {
+            "backbone_mode": "full", "backbone_lr": 1e-5, "weight_decay": 1e-2,
+            "anchor_layout": "per_level", "anchor_base_scale": 4.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 2, "grad_accum_steps": 2,
+            "img_size": 1280, "lr": 2e-4, "onecycle_pct_start": 0.1,
+            "focal_gamma": 2.0, "box_loss_weight": 1.0,
+            "aug_multiscale_range": [0.7, 1.0], "aug_rotation_deg": 7.0, "aug_jitter_scale": 1.5,
+            "fusion_layers": [6, 12, 18, 24],
+        },
+        "search_space": {"base_seed": [42]},
+    },
+    "dinov3_final_giou": {  # DINOv3: fusion + 150ep + GIoU (the extra shot at 0.58+)
+        "backbone": "dinov3_vitl16",
+        "trial_epochs": 10,
+        "schedule_epochs": [150],
+        "max_trials": 1,
+        "register_winner": True,
+        "pinned": {
+            "backbone_mode": "full", "backbone_lr": 1e-5, "weight_decay": 1e-2,
+            "anchor_layout": "per_level", "anchor_base_scale": 4.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 2, "grad_accum_steps": 2,
+            "img_size": 1280, "lr": 2e-4, "onecycle_pct_start": 0.1,
+            "focal_gamma": 2.0, "box_loss_weight": 1.0,
+            "aug_multiscale_range": [0.7, 1.0], "aug_rotation_deg": 7.0, "aug_jitter_scale": 1.5,
+            "fusion_layers": [6, 12, 18, 24], "box_loss_type": "giou",
+        },
+        "search_space": {"base_seed": [42]},
+    },
 }
 
 # 03_precompute_embeddings
@@ -460,5 +581,6 @@ print(f"VOLUME_PATH      = {VOLUME_PATH}")
 print(f"CACHE_DIR        = {CACHE_DIR}")
 print(f"EXPERIMENT_NAME  = {EXPERIMENT_NAME}")
 print(f"DETECTOR_MODEL   = {DETECTOR_MODEL_NAME}")
+print(f"CHAMPION_MODEL   = {CHAMPION_MODEL_NAME}")
 print(f"TRAIN_EMB_TABLE  = {TRAIN_EMBEDDINGS_TABLE}")
 print(f"VS_INDEX_NAME    = {VS_INDEX_NAME}")

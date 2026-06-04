@@ -39,6 +39,30 @@ class BackboneInfo:
     image_std: list[float] = field(default_factory=lambda: list(CLIP_STD))
 
 
+class _LayerFusion(nn.Module):
+    """Learnable softmax-weighted fusion of several ViT layers' patch tokens.
+
+    Given a list of ``num_layers`` token maps each ``(B, T, D)`` (one per
+    selected hidden-state depth), apply a per-layer LayerNorm and combine them
+    with a learnable softmax weight into a single ``(B, T, D)`` map. The weight
+    is initialised to zeros so the softmax starts uniform — i.e. an equal
+    average of the chosen depths, the ViT-Det multi-scale-feature hypothesis —
+    then learns to re-weight depths during training.
+    """
+
+    def __init__(self, num_layers: int, dim: int) -> None:
+        super().__init__()
+        self.norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(num_layers)])
+        self.weight = nn.Parameter(torch.zeros(num_layers))
+
+    def forward(self, maps: list[torch.Tensor]) -> torch.Tensor:
+        if len(maps) != len(self.norms):
+            raise ValueError(f"_LayerFusion expected {len(self.norms)} maps, got {len(maps)}")
+        stacked = torch.stack([norm(m) for norm, m in zip(self.norms, maps)], dim=0)  # (L,B,T,D)
+        w = torch.softmax(self.weight, dim=0).view(-1, 1, 1, 1).to(stacked.dtype)
+        return (w * stacked).sum(dim=0)  # (B,T,D)
+
+
 def _assert_cradio_runtime_deps() -> None:
     """Pre-flight check for nvidia/C-RADIOv4-SO400M trust_remote_code deps.
 
@@ -129,13 +153,36 @@ class DinoV3Wrapper(nn.Module):
     hardcoded so a config change doesn't silently misalign the grid.
     """
 
-    def __init__(self, model: nn.Module) -> None:
+    def __init__(self, model: nn.Module, fusion_layers: list[int] | None = None) -> None:
         super().__init__()
         self.model = model
         # 1 CLS token + N register tokens precede the patch tokens.
         self.num_prefix = 1 + int(getattr(model.config, "num_register_tokens", 0))
+        # Optional multi-layer feature fusion (ViT-Det style). When set, the
+        # spatial map fed to the FPN is a learnable weighted blend of these
+        # hidden-state depths instead of the last layer only. `fusion` is a
+        # trainable head (see builder/trainer param-group routing).
+        self.fusion_layers = list(fusion_layers) if fusion_layers else None
+        self.fusion: _LayerFusion | None = None
+        if self.fusion_layers:
+            dim = int(getattr(model.config, "hidden_size"))
+            self.fusion = _LayerFusion(len(self.fusion_layers), dim)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.fusion_layers and self.fusion is not None:
+            out = self.model(images, output_hidden_states=True)
+            hidden = out.hidden_states  # tuple len (num_layers + 1), each (B, 1+R+T, D)
+            n_hidden = len(hidden)
+            maps: list[torch.Tensor] = []
+            for idx in self.fusion_layers:
+                if not (-n_hidden <= idx < n_hidden):
+                    raise IndexError(
+                        f"fusion_layers index {idx} out of range for {n_hidden} hidden states"
+                    )
+                maps.append(hidden[idx][:, self.num_prefix:, :])  # (B, T, D) patch tokens only
+            summary = out.last_hidden_state[:, 0, :]  # CLS -> (B, D)
+            spatial = self.fusion(maps)  # (B, T, D)
+            return summary, spatial
         out = self.model(images)
         last = out.last_hidden_state  # (B, 1 + R + T, D)
         summary = last[:, 0, :]  # CLS -> (B, D)
@@ -150,6 +197,7 @@ def load_backbone(
     device: str = "cuda",
     local_files_only: bool = False,
     freeze: bool = True,
+    fusion_layers: list[int] | None = None,
 ) -> tuple[nn.Module, BackboneInfo]:
     """Load a vision backbone, return wrapped model + dimension info.
 
@@ -166,6 +214,11 @@ def load_backbone(
     local_files_only forces a strictly-offline load from the cache (set at
     serving time, where the HF cache is bundled into the model artifact and the
     container has no egress). It also flips the HF offline env flags.
+
+    ``fusion_layers`` (DINOv3 only) enables multi-layer ViT feature fusion: the
+    spatial map handed to the FPN becomes a learnable weighted blend of those
+    hidden-state depths instead of the last layer alone. Its small combiner is
+    forced trainable even under ``freeze=True`` so it can learn.
     """
     from dais26_dentex.platform.hf_env import configure_hf_env
 
@@ -204,7 +257,8 @@ def load_backbone(
             cache_dir=cache_dir,
             local_files_only=local_files_only,
         )
-        wrapped = DinoV3Wrapper(model)  # HF BaseModelOutputWithPooling: strip CLS + register tokens
+        # HF BaseModelOutputWithPooling: strip CLS + register tokens (+ optional fusion)
+        wrapped = DinoV3Wrapper(model, fusion_layers=fusion_layers)
         info = BackboneInfo(
             name="dinov3_vitl16",
             summary_dim=1024,
@@ -231,6 +285,9 @@ def load_backbone(
     else:
         raise ValueError(f"Unknown backbone: {name}")
 
+    if fusion_layers and name != "dinov3_vitl16":
+        raise ValueError(f"fusion_layers is only supported for dinov3_vitl16, not {name!r}")
+
     if freeze:
         wrapped.requires_grad_(False)
         wrapped.eval()
@@ -239,5 +296,11 @@ def load_backbone(
         # stochastic depth in the encoder behave as during pretraining.
         wrapped.requires_grad_(True)
         wrapped.train()
+    # The fusion combiner is a learnable head, not pretrained weights — keep it
+    # trainable (and in train() mode) regardless of the encoder freeze policy.
+    fusion = getattr(wrapped, "fusion", None)
+    if fusion is not None:
+        fusion.requires_grad_(True)
+        fusion.train()
     wrapped.to(device)
     return wrapped, info

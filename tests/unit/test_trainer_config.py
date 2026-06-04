@@ -609,3 +609,71 @@ def test_validate_accepts_valid_threshold_aug_config() -> None:
         aug_rotation_deg=7.0,
         aug_multiscale_range=[0.7, 1.0],
     ).validate()
+
+
+# --- Track B levers: fusion_layers / box_loss_type / caries_oversample ---
+
+
+def test_defaults_are_legacy_for_track_b() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s")
+    assert cfg.fusion_layers is None
+    assert cfg.box_loss_type == "smooth_l1"
+    assert cfg.caries_oversample == pytest.approx(1.0)
+
+
+def test_from_dict_coerces_track_b_fields() -> None:
+    cfg = TrainerConfig.from_dict(
+        {
+            "catalog": "c",
+            "schema": "s",
+            "backbone_name": "dinov3_vitl16",
+            "fusion_layers": ["6", 12, "18", 24],  # -> ints
+            "box_loss_type": "giou",
+            "caries_oversample": "2.0",  # -> float
+        }
+    )
+    assert cfg.fusion_layers == [6, 12, 18, 24]
+    assert all(isinstance(x, int) for x in cfg.fusion_layers)
+    assert cfg.box_loss_type == "giou"
+    assert cfg.caries_oversample == pytest.approx(2.0)
+    cfg.validate()  # valid combo
+
+
+def test_validate_fusion_requires_dinov3() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", backbone_name="cradio_v4_so400m", fusion_layers=[6, 12])
+    with pytest.raises(ValueError, match="fusion_layers"):
+        cfg.validate()
+
+
+def test_validate_fusion_empty_list_rejected() -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", backbone_name="dinov3_vitl16", fusion_layers=[])
+    with pytest.raises(ValueError, match="fusion_layers"):
+        cfg.validate()
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"box_loss_type": "iou"}, "box_loss_type"),
+        ({"caries_oversample": 0.5}, "caries_oversample"),
+    ],
+)
+def test_validate_rejects_bad_track_b_values(kwargs: dict, match: str) -> None:
+    cfg = TrainerConfig(catalog="c", schema="s", **kwargs)
+    with pytest.raises(ValueError, match=match):
+        cfg.validate()
+
+
+def test_to_mlflow_params_includes_track_b_fields() -> None:
+    cfg = TrainerConfig(
+        catalog="c",
+        schema="s",
+        backbone_name="dinov3_vitl16",
+        fusion_layers=[6, 12, 18, 24],
+        box_loss_type="giou",
+        caries_oversample=2.0,
+    )
+    params = cfg.to_mlflow_params()
+    assert params["box_loss_type"] == "giou"
+    assert params["caries_oversample"] == "2.0"
+    assert params["fusion_layers"] == "[6, 12, 18, 24]"

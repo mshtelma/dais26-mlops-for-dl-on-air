@@ -4,7 +4,7 @@ bundle:
 variables:
   sp_app_id:
     description: "Service principal application ID (UUID) for prod run_as. Created via 'databricks service-principals create --display-name dais26-vfm-sp'. Required for prod target."
-    default: ""
+    default: "b3791f25-4356-4a6d-916a-91bbeebd950d"
 
 artifacts:
   dais26_vfm_wheel:
@@ -15,6 +15,7 @@ artifacts:
 include:
   - "resources/jobs/*.yml"
   - "resources/experiments/*.yml"
+  - "resources/registered_models/*.yml"
   # NOTE: resources/serving/*.yml is intentionally NOT included.
   # Serving endpoints are deployed via SDK in the deploy_endpoint task after training,
   # gated on @candidate alias being set on a registered model version.

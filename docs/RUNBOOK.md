@@ -95,10 +95,70 @@ Run this checklist the day before the talk (Sunday June 14). Estimated time: 45 
 
 ---
 
+## Deployment job (primary promotion path)
+
+The MLflow 3 deployment job `deploy_job_detector` (`resources/jobs/deploy_job_detector.yml`)
+is the primary path from a trained model to a served champion. The standalone
+`deploy_endpoint` job (notebook `04_deploy_serving.py`) is now the break-glass / manual
+redeploy path only.
+
+### Dev / prod asset split (two schemas)
+
+Following the Big Book "deploy code" pattern, dev and prod registered models live in
+separate UC schemas (`notebooks/00_config.py`):
+
+- **Dev** — `CATALOG.SCHEMA` (`mlops_pj.dais26_vfm`). Training / the HPO sweep register
+  new versions here and set the dev alias `@challenger` (constant `ALIAS_CANDIDATE`,
+  value `challenger`).
+- **Prod / champion** — `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`).
+  The promote task copies the approved dev version here (lineage preserved) and sets
+  `@champion`. `notebooks/00_setup.py` creates this schema + the SP grants.
+
+### How a release flows
+
+1. **Trigger.** The HPO sweep (`02b`) sets `@challenger` on a dev detector model **only
+   when** the retrained winner's `val/best_mAP_50` strictly beats the experiment's prior
+   best (the challenger registration gate, pure `sweep.beats_experiment_best`). A new
+   `@challenger` version auto-triggers `deploy_job_detector` (wired by
+   `connect_deployment_job` / `notebooks/13`, which calls
+   `update_registered_model(deployment_job_id=...)` for both dev detectors).
+2. **Evaluation** (`notebooks/10`, GPU `GPU_1xA10` / `databricks_ai_v5`): re-scores the
+   triggered version on the DENTEX **test** split via the shared `eval.runner`, logs
+   `test/*` metrics to the model version, and gates on `mAP@50 ≥ 0.58 AND
+   Caries AP@50 ≥ 0.30` AND best-in-experiment (≥ current prod `@champion` re-scored on
+   test, and ≥ every prior evaluated version). Fails the task otherwise.
+3. **Approval** (`notebooks/11`, CPU, `max_retries: 0`): passes only when the UC tag
+   `Approval_Check = Approved` is set on the version. To approve:
+   ```python
+   from mlflow.tracking import MlflowClient
+   c = MlflowClient(registry_uri="databricks-uc")
+   c.set_model_version_tag(name=MODEL_NAME, version=MODEL_VERSION,
+                           key="Approval_Check", value="Approved")
+   ```
+   then repair-run the Approval task.
+4. **Promote** (`notebooks/12`, CPU): `copy_model_version` from dev →
+   `CHAMPION_CATALOG.CHAMPION_SCHEMA` (lineage to the source run preserved), then
+   `deploy_and_smoke_test(..., model_version=<new prod version>, promote_on_success=True)`
+   deploys that explicit prod version and flips `@champion` **only** on a passing smoke
+   test. On failure `@champion` is left untouched (previous champion keeps serving).
+
+### One-time wiring after deploy
+
+```bash
+databricks bundle deploy -t <target>
+databricks bundle run connect_deployment_job -t <target>   # wires deployment_job_id to both dev models
+```
+
+Re-run `connect_deployment_job` if `deploy_job_detector` is ever recreated (its id changes).
+
+---
+
 ## Rollback procedure
 
 Use this when a newly promoted `@champion` version is producing bad results and you need to revert
-to the previous version.
+to the previous version. (`@champion` now lives on the **prod** model
+`mlops_pj.dais26_vfm_prod.<backbone>_detector`; the examples below use the dev-schema
+names but apply the same way to the prod champion model.)
 
 ### Step 1 — Find the previous champion version
 
@@ -362,9 +422,19 @@ GRANT MODIFY, SELECT ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
 GRANT READ VOLUME, WRITE VOLUME ON VOLUME ml.dais26_vfm.dentex_raw TO \`$SP_APP_ID\`;
 GRANT READ VOLUME, WRITE VOLUME ON VOLUME ml.dais26_vfm.model_cache TO \`$SP_APP_ID\`;
 GRANT CREATE MODEL ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
+GRANT APPLY TAG ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
 GRANT EXECUTE ON MODEL ml.dais26_vfm.cradio_detector TO \`$SP_APP_ID\`;
+-- Prod / champion schema (deployment-job promote target): the SP copies the
+-- approved dev version here and sets @champion, so it needs USE/CREATE MODEL/
+-- APPLY TAG on the prod schema and EXECUTE on the dev models (copy source).
+GRANT USE CATALOG ON CATALOG ml TO \`$SP_APP_ID\`;
+GRANT USE SCHEMA, CREATE MODEL, APPLY TAG ON SCHEMA ml.dais26_vfm_prod TO \`$SP_APP_ID\`;
 "
 ```
+
+> These grants are applied automatically by `notebooks/00_setup.py` (which uses the
+> `CHAMPION_CATALOG.CHAMPION_SCHEMA` config values); the SQL above is the manual
+> equivalent for reference.
 
 ### Step 4 — Grant inference table access (deferred)
 
@@ -391,6 +461,55 @@ Options:
    application ID displayed there.
 
 The `applicationId` used in DAB `run_as` must match the Entra App ID, not the Databricks internal ID.
+
+### CI/CD via OAuth M2M (service principal client id + secret) {#cicd-oauth-m2m}
+
+All three workflows authenticate to Databricks via **OAuth machine-to-machine
+(M2M)** using the SP's client id + an OAuth secret. The secret mints short-lived
+OAuth tokens (no long-lived PAT). This path needs only **SP-create + OAuth-secret**
+rights — **no account admin / workload-identity-federation policy** (that route is
+account-admin-only; use it instead if you have account-admin access).
+
+- `.github/workflows/deploy.yml` — deploys the bundle + runs `connect_deployment_job`
+  (environments `dev`/`prod`).
+- `.github/workflows/ci.yml` (`dab-validate`) and `weekly_air_check.yml` (`check-air`)
+  — read-only checks; both use a shared `ci` environment.
+
+One-time setup:
+
+1. **Generate an OAuth secret on the SP.** Either the UI (Settings → Identity and
+   access → Service principals → `dais26-vfm-sp` → Secrets → Generate secret) or the
+   CLI:
+
+   ```bash
+   # SP_NUMERIC_ID is the SP's Databricks id (not the application UUID).
+   databricks service-principal-secrets create <SP_NUMERIC_ID>
+   # → returns { "secret": "dose...", "secret_hash": "..." }  — copy `secret` now;
+   #   it is shown only once.
+   ```
+
+   The SP **application UUID** is the value for `DATABRICKS_CLIENT_ID`; the returned
+   `secret` is `DATABRICKS_CLIENT_SECRET`.
+
+2. **Create the `dev`, `prod`, and `ci` GitHub Environments** (repo Settings →
+   Environments). Add a **required reviewer** on `prod` to gate production deploys;
+   leave `dev` and `ci` without reviewers (they run unattended / on a schedule).
+   Per environment, set:
+   - **Variable** `DATABRICKS_HOST` — the workspace URL for that environment.
+   - **Variable** `DATABRICKS_CLIENT_ID` — the SP application UUID (also reused for
+     `sp_app_id` in `run_as`; the workflow passes it through automatically).
+   - **Secret** `DATABRICKS_CLIENT_SECRET` — the OAuth secret from step 1.
+
+3. The workflows set `DATABRICKS_AUTH_TYPE: oauth-m2m`; the Databricks CLI exchanges
+   the client id + secret for short-lived OAuth tokens. Trigger manually (choose the
+   target) or let a push to `main` auto-deploy `dev`.
+
+> Rotate the OAuth secret periodically: generate a new one (an SP can hold multiple),
+> update `DATABRICKS_CLIENT_SECRET` in each environment, then delete the old secret
+> with `databricks service-principal-secrets delete <SP_NUMERIC_ID> <SECRET_ID>`.
+> If you later obtain account-admin access, prefer migrating to OIDC token federation
+> (secret-free) — the workflows only need `DATABRICKS_AUTH_TYPE` flipped to
+> `github-oidc` + `permissions: id-token: write`.
 
 ---
 

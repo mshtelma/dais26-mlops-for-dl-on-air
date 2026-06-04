@@ -373,6 +373,70 @@ w.serving_endpoints.create_and_wait(
 
 ---
 
+## Deployment job + cross-schema promotion (MLflow 3)
+
+The flows above describe the original single-schema, alias-flip promotion driven by the
+`deploy_endpoint` task. That path is retained as **break-glass / manual redeploy**. The
+**primary** promotion path is now the MLflow 3 deployment job `deploy_job_detector`
+(`resources/jobs/deploy_job_detector.yml`), which aligns the repo to the Big Book
+"deploy code" pattern.
+
+### Terminology + asset split
+
+- Dev alias renamed `@candidate` → **`@challenger`** (constant `ALIAS_CANDIDATE` keeps
+  its name for call-site stability; only its value moved — see
+  `src/dais26_dentex/config/constants.py`).
+- **Two schemas** (`notebooks/00_config.py`): dev detectors with `@challenger` live in
+  `CATALOG.SCHEMA` (`mlops_pj.dais26_vfm`); prod champions with `@champion` live in
+  `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`). Both are declared as
+  bundle-managed `registered_models` (`resources/registered_models/detector_models.yml`)
+  and the prod schema + SP grants are created by `notebooks/00_setup.py`.
+- `EXPERIMENT_NAME` repointed at the bundle-managed experiment
+  (`resources/experiments/vfm_experiment.yml`) so the trainer, the HPO sweep, the
+  lineage-preserving champion copy, and the eval task's best-in-experiment search all
+  share one experiment root.
+
+### Job graph
+
+```
+new @challenger version on a dev detector model
+        │  (auto-trigger; wired by connect_deployment_job / notebooks/13:
+        │   update_registered_model(deployment_job_id=...) for both dev detectors)
+        ▼
+deploy_job_detector  (max_concurrent_runs: 1, params model_name + model_version)
+  ├─ Evaluation (notebooks/10, GPU_1xA10 / databricks_ai_v5)
+  │     score @challenger version on TEST via eval.runner.score_model_on_split,
+  │     log test/* metrics to the model version (LoggedModel),
+  │     gate: mAP@50 ≥ 0.58 AND Caries AP@50 ≥ 0.30 AND best-in-experiment
+  │           (≥ prod @champion re-scored on test AND ≥ prior evaluated versions)
+  ├─ Approval (notebooks/11, CPU, max_retries: 0)
+  │     pass only if UC tag Approval_Check == Approved on the version
+  └─ Promote (notebooks/12, CPU)
+        copy_model_version dev → CHAMPION_FULL (lineage to source run preserved),
+        deploy_and_smoke_test(model_version=<new prod version>, promote_on_success=True)
+        → flips @champion on the prod model ONLY on a passing smoke test
+```
+
+### Challenger registration gate
+
+`02b_hpo_sweep.py` sets `@challenger` on the dev model only when the retrained winner's
+`val/best_mAP_50` strictly beats the experiment's prior best registered version (pure,
+unit-tested `sweep.beats_experiment_best`); otherwise it restores `@challenger` to the
+prior best version. This prevents a regression from auto-triggering the deployment job.
+
+### Closed gaps / alignment notes
+
+| Prior gap | Resolution |
+|-----------|------------|
+| Single schema for `@candidate` + `@champion` | Dev/prod schema split; champion is a lineage-preserving copy, not an alias flip on the dev model |
+| No best-in-experiment gate | Eval task (test split) + challenger registration gate (val split) |
+| Eval on `val`, ungated, standalone | Shared `eval.runner` scores both `val` + `test`; the deployment-job eval task gates promotion on `test` |
+| Per-user experiment | Repointed at the bundle-managed experiment |
+| No dataset lineage | Trainer logs `mlflow.log_input(DENTEX-train, context="training")` |
+| Terminology drift (`candidate`) | Renamed to `challenger` |
+
+---
+
 ## Reference endpoint configuration (documentation only)
 
 This YAML shows the target endpoint state. It is **not** in `resources/` and is **not** deployed by
@@ -607,13 +671,15 @@ table/index prefix `dais26_dentex_`, backbone `dinov3_vitl16`. The table below u
 
 | Resource type | Full name | Notes |
 |---------------|-----------|-------|
-| Schema | `<catalog>.dais26_vfm` | Created by `00_setup.py` |
+| Schema | `<catalog>.dais26_vfm` | Dev schema; created by `00_setup.py` |
+| Schema | `<catalog>.dais26_vfm_prod` | Prod / champion schema; created by `00_setup.py` |
 | Volume | `…/dentex_raw` | Raw DENTEX images + COCO JSON |
 | Volume | `…/model_cache` | Pinned C-RADIOv4 weights + pre-baked DINOv2 fallback |
 | Delta table | `…/train_embeddings` | `ARRAY<FLOAT>` dim=1152, CDF=true |
 | Delta table | `…/drift_scores` | Hourly drift job output |
 | Delta table | `…/detector_inference_*` | Auto-created by AI Gateway on first request |
-| Registered model | `…/cradio_detector` (or `…/dinov3_detector`) | Backbone-keyed name; aliases: `@champion`, `@candidate`, `@demo-frozen` |
+| Registered model | `dais26_vfm/cradio_detector` (or `dinov3_detector`) | DEV; backbone-keyed name; alias `@challenger` (+ `@demo-frozen`); bundle-managed |
+| Registered model | `dais26_vfm_prod/cradio_detector` (or `dinov3_detector`) | PROD champion; lineage-preserving copy of the approved dev version; alias `@champion`; bundle-managed |
 | Registered model | `…/cradio_embedder` | Alias: `@champion` (STRETCH) |
 | MLflow experiment | `/Users/<user>/dais26_vfm_experiment` | All training runs |
 | VS index | `…/embeddings_index` | DELTA_SYNC, dim derived from the embeddings table (1152 / 1024) |
