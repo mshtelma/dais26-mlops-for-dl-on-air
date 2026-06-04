@@ -1,6 +1,5 @@
 import base64
 import io
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -34,7 +33,11 @@ class _FakeBackbone(nn.Module):
 
 @pytest.fixture
 def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
-    """Build a minimal artifacts bundle for DetectorPyfunc.load_context."""
+    """Build a minimal v2 artifacts bundle for DetectorPyfunc.load_context.
+
+    v2 collapses the old backbone_config/detection_config/label_map trio into a
+    single typed ``manifest.json`` (see config/manifest.py)."""
+    from dais26_dentex.config.manifest import BackboneSpec, DetectorSpec, Manifest
     from dais26_dentex.models.detection_head import DetectionModel
 
     model = DetectionModel(
@@ -48,50 +51,37 @@ def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
     state_path = tmp_path / "model_state.pt"
     torch.save(model.state_dict(), state_path)
 
-    backbone_config = tmp_path / "backbone_config.json"
-    backbone_config.write_text(
-        json.dumps(
-            {
-                "name": "fake_backbone",
-                "revision": None,
-                "summary_dim": 1152,
-                "spatial_dim": 1152,
-                "patch_size": 16,
-            }
-        )
-    )
+    manifest_path = tmp_path / "manifest.json"
+    Manifest(
+        backbone=BackboneSpec(
+            name="fake_backbone",
+            revision=None,
+            summary_dim=1152,
+            spatial_dim=1152,
+            patch_size=16,
+        ),
+        detector=DetectorSpec(
+            num_classes=4,
+            scales=[16, 32, 64, 128],
+            aspect_ratios=[0.5, 1.0, 2.0],
+            score_threshold=0.05,
+            nms_iou_threshold=0.5,
+            max_detections=100,
+            input_size=64,
+        ),
+        label_map={
+            "0": "Caries",
+            "1": "Deep Caries",
+            "2": "Periapical Lesion",
+            "3": "Impacted",
+        },
+    ).write(manifest_path)
 
-    detection_config = tmp_path / "detection_config.json"
-    detection_config.write_text(
-        json.dumps(
-            {
-                "num_classes": 4,
-                "scales": [16, 32, 64, 128],
-                "aspect_ratios": [0.5, 1.0, 2.0],
-                "score_threshold": 0.05,
-                "nms_iou_threshold": 0.5,
-                "max_detections": 100,
-                "input_size": 64,
-            }
-        )
-    )
-
-    label_map = tmp_path / "label_map.json"
-    label_map.write_text(
-        json.dumps(
-            {
-                "0": "Caries",
-                "1": "Deep Caries",
-                "2": "Periapical Lesion",
-                "3": "Impacted",
-            }
-        )
-    )
-
-    # Monkey-patch load_backbone to return our fake
+    # Monkey-patch load_backbone to return our fake. `**kwargs` absorbs the
+    # serving-only knobs (local_files_only, fusion_layers) the builder passes.
     from dais26_dentex.models.backbones import BackboneInfo
 
-    def fake_load(name, revision=None, cache_dir=None, device="cpu"):
+    def fake_load(name, revision=None, cache_dir=None, device="cpu", **kwargs):
         return _FakeBackbone(), BackboneInfo(
             name=name,
             summary_dim=1152,
@@ -105,9 +95,7 @@ def detector_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
 
     return {
         "model_state": str(state_path),
-        "backbone_config": str(backbone_config),
-        "detection_config": str(detection_config),
-        "label_map": str(label_map),
+        "manifest": str(manifest_path),
     }
 
 
@@ -174,7 +162,7 @@ def test_letterbox_decode_and_inverse_roundtrip():
     # full original image [0,0,200,100]. The old per-axis inverse would have
     # produced [0,0,200,50] (half height) — this asserts the uniform inverse.
     class _FixedModel(nn.Module):
-        def forward(self, batch):  # noqa: D401 — minimal stub
+        def forward(self, batch):
             return {
                 "boxes": [torch.tensor([[0.0, 0.0, 64.0, 32.0]])],
                 "scores": [torch.tensor([0.9])],

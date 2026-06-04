@@ -26,7 +26,9 @@ def test_fusion_uniform_at_init_is_mean_of_layernormed():
     fusion = _LayerFusion(num_layers=4, dim=6)
     fusion.eval()
     maps = [torch.randn(2, 3, 6) for _ in range(4)]
-    expected = torch.stack([norm(m) for norm, m in zip(fusion.norms, maps)], dim=0).mean(dim=0)
+    expected = torch.stack(
+        [norm(m) for norm, m in zip(fusion.norms, maps, strict=True)], dim=0
+    ).mean(dim=0)
     out = fusion(maps)
     assert torch.allclose(out, expected, atol=1e-5)
 

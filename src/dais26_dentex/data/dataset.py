@@ -111,7 +111,7 @@ def build_caries_oversampled_indices(
     expanded = list(base)
     for _ in range(full - 1):  # `base` already contributes one copy
         expanded.extend(positives)
-    extra = int(round(frac * len(positives)))
+    extra = round(frac * len(positives))
     expanded.extend(positives[:extra])
     return expanded
 

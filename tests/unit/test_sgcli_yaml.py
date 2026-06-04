@@ -35,11 +35,11 @@ def test_workload_compute_h100_or_a10():
     assert isinstance(d["compute"]["gpus"], int) and d["compute"]["gpus"] >= 1
 
 
-def test_workload_code_source_repo_path_is_parent():
-    """repo_path is resolved relative to the YAML location — must be `..` so it points
-    at the repo root from sgcli/."""
+def test_workload_code_source_repo_path_is_repo_root():
+    """repo_path is resolved relative to CWD (sgcli runs from the repo root), so it
+    must be `.` to snapshot the repo root."""
     d = _load(WORKLOAD)
-    assert d["code_source"]["snapshot"]["repo_path"] == ".."
+    assert d["code_source"]["snapshot"]["repo_path"] == "."
 
 
 def test_workload_command_does_not_use_no_deps():

@@ -10,9 +10,8 @@ The two correctness traps the test must catch:
 
 from __future__ import annotations
 
-import torch
-
 import pytest
+import torch
 
 from dais26_dentex.train.losses import (
     _giou_elementwise,

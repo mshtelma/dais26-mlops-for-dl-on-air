@@ -58,7 +58,9 @@ class _LayerFusion(nn.Module):
     def forward(self, maps: list[torch.Tensor]) -> torch.Tensor:
         if len(maps) != len(self.norms):
             raise ValueError(f"_LayerFusion expected {len(self.norms)} maps, got {len(maps)}")
-        stacked = torch.stack([norm(m) for norm, m in zip(self.norms, maps)], dim=0)  # (L,B,T,D)
+        stacked = torch.stack(
+            [norm(m) for norm, m in zip(self.norms, maps, strict=True)], dim=0
+        )  # (L,B,T,D)
         w = torch.softmax(self.weight, dim=0).view(-1, 1, 1, 1).to(stacked.dtype)
         return (w * stacked).sum(dim=0)  # (B,T,D)
 
@@ -165,7 +167,7 @@ class DinoV3Wrapper(nn.Module):
         self.fusion_layers = list(fusion_layers) if fusion_layers else None
         self.fusion: _LayerFusion | None = None
         if self.fusion_layers:
-            dim = int(getattr(model.config, "hidden_size"))
+            dim = int(model.config.hidden_size)
             self.fusion = _LayerFusion(len(self.fusion_layers), dim)
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
