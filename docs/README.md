@@ -48,9 +48,9 @@ config file before launching.
 | `CATALOG` | `mlops_pj` | catalog for all schemas/tables/models |
 | `SCHEMA` | `dais26_vfm` | schema |
 | `TABLE_PREFIX` | `dais26_dentex_` | table/index prefix so multiple projects share one schema (e.g. `dais26_dentex_train_embeddings`) |
-| `BACKBONE` | `dinov3_vitl16` | backbone + the backbone-keyed model/endpoint names (`dinov3_detector`, `dais26-dinov3-detector-dev`) |
+| `BACKBONE` | `cradio_v4_so400m` | backbone + the backbone-keyed model/endpoint names (`cradio_detector`, `dais26-cradio-detector-dev`) |
 
-Switch `BACKBONE` to `cradio_v4_so400m` for the ungated C-RADIOv4 path. The command examples below
+Switch `BACKBONE` to `dinov3_vitl16` for the gated DINOv3 comparison path. The command examples below
 use the legacy `ml_dev` / `cradio_detector` names; substitute your configured values.
 
 ### Step 3 — Authenticate with Databricks
@@ -133,8 +133,13 @@ This deploys **only** UC resources and job definitions. It does **not** deploy s
 What gets created:
 - UC schema `ml_dev.dais26_vfm` with volumes `dentex_raw` and `model_cache`
 - MLflow experiment `/Users/<you>/dais26_vfm_experiment`
-- Job definitions: `train_detector`, `hpo_sweep`, `precompute_embeddings`, `drift_monitor`
+- Dev job definitions: `train_detector`, `campaign_sweep`, `eval_comparison`, `eval_threshold_grid`
 - Secret scope `dais26-secrets` (for optional DINOv3 path)
+
+> The embedding/monitoring jobs (`precompute_embeddings`, `create_vector_search`,
+> `drift_monitor`) and the champion schema/models are **prod-only** — they deploy
+> under `databricks bundle deploy -t prod` because their tables and VS index live in
+> the champion schema (`dais26_vfm_prod`).
 
 ### Step 7 — Run the training job (Phase 2)
 
@@ -194,9 +199,12 @@ C-RADIO / DINOv3 backbone:
 # 1. (recommended) audit the architecture first — anchors, positive ratio, NMS, delta clamp
 databricks bundle run train_detector -t dev   # or open notebooks/02a_arch_probe.py and run all
 
-# 2. launch the sweep
-databricks bundle run hpo_sweep -t dev
+# 2. launch the sweep (single driver; pick a stage)
+databricks bundle run campaign_sweep -t dev -- --params sweep_stage=dinov3_s1
 ```
+
+> See [HPO.md](HPO.md) for the full push-to-0.60 mAP campaign — the architectural fixes
+> (per-level anchors, per-class NMS), the winning runs, and the stage-by-stage sweep record.
 
 The sweep runs as a parent MLflow run with one nested child run per trial, sharing the same
 `Trainer` core as Step 7. It explores learning rates, `backbone_mode`
@@ -213,17 +221,19 @@ regularization. All sweep parameters are config-driven from the `SWEEP_*` block 
 | `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` → `@candidate` |
 | `SWEEP_SEARCH_SPACE` | see config | per-knob value lists (incl. `backbone_mode`, `anchor_mode`) |
 
-Expected wall time: up to **8 hours** on `GPU_8xH100` (the job carries an 8-hour timeout).
-The winning trial is re-trained at full epochs, registered to UC, and aliased `@candidate`;
-the `deploy_endpoint` task then promotes it to `@champion` on a passing smoke test — so the
-sweep flows straight into the same deployment path as Step 7.
+Expected wall time: up to **48 hours** on `GPU_8xH100` (the job carries a 48-hour timeout).
+The winning trial is re-trained at full epochs, registered to UC, and aliased `@challenger`
+only when it clears the best-in-experiment gate; the trailing `confirm_challenger` task then
+asserts the alias landed. Promotion to `@champion` happens via the `deploy_job_detector`
+deployment job (eval → approval → cross-schema promote).
 
 ### Step 9 — Precompute embeddings (Phase 3)
 
 ```bash
-databricks bundle run precompute_embeddings -t dev
+databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 ```
 
+`precompute_embeddings` is a task inside the prod `deploy_champion_job` (not a standalone job).
 This runs `03_precompute_embeddings.py` on serverless GPU, which:
 - Computes the backbone `summary` embeddings (C-RADIOv4: dim 1152, DINOv3: dim 1024) for all 1005 DENTEX images
 - Writes to `<catalog>.<schema>.<prefix>train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
@@ -235,9 +245,10 @@ it explicitly in the next step.
 ### Step 9b — Create the Vector Search endpoint + index
 
 ```bash
-databricks bundle run create_vector_search -t dev
+databricks bundle run deploy_champion_job -t prod --only create_vector_search
 ```
 
+`create_vector_search` is also a task inside `deploy_champion_job`.
 This runs `04b_create_vector_search.py` (no GPU), which idempotently creates the VS endpoint
 (`dais26-vfm-vs`) and a DELTA_SYNC index over the embeddings table, triggers a sync, waits for the
 index to come `ONLINE`, and runs a smoke-test similarity query. The embedding dimension is **derived
@@ -308,7 +319,7 @@ Expected: 10 results with `image_id` and `diagnosis` columns.
 # Create service principal first (see RUNBOOK.md)
 databricks bundle deploy -t prod
 databricks bundle run train_detector -t prod
-databricks bundle run precompute_embeddings -t prod
+databricks bundle run deploy_champion_job -t prod
 ```
 
 The `prod` target sets `scale_to_zero: false` (minimum 1 replica always warm) and uses a service

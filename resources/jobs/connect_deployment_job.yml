@@ -2,18 +2,23 @@ resources:
   jobs:
     connect_deployment_job:
       name: "dais26_connect_deployment_job_${bundle.target}"
-      description: "One-shot post-deploy wiring: resolve the deploy_job_detector job id and update_registered_model(deployment_job_id=...) for both dev detector models (cradio_detector, dinov3_detector) so a new @challenger version auto-triggers the deployment job. Run once after `databricks bundle deploy` (and again if the deploy job is recreated). Runs notebooks/13."
+      description: "One-shot post-deploy wiring: update_registered_model(deployment_job_id=...) so new versions auto-trigger the right MLflow 3 deployment job. Target-aware (notebooks/13): on -t dev it connects the CHALLENGER job (deploy_job_detector) to the dev detector models (cradio_detector, dinov3_detector) so a new @challenger version triggers eval/approval/register; on -t prod it connects the CHAMPION job (deploy_champion_job) to the prod detector_champion model so a new champion version (the RegisterChampion copy) triggers deploy + smoke + refresh. Run once after `databricks bundle deploy` (and again if a deploy job is recreated)."
       tags:
         project: "dais26-vfm"
         component: "deployment-job"
 
       timeout_seconds: 600
 
-      # The deployment job's id, resolved by DAB from the sibling job resource and
-      # forwarded to the notebook as a widget. No name lookup needed.
+      # Both deployment-job ids (resolved by DAB from the sibling job resources) plus
+      # the bundle target, forwarded to the notebook as widgets. notebooks/13 picks
+      # which model->job association to set based on the target. No name lookup needed.
       parameters:
-        - name: deployment_job_id
+        - name: bundle_target
+          default: "${bundle.target}"
+        - name: challenger_deployment_job_id
           default: "${resources.jobs.deploy_job_detector.id}"
+        - name: champion_deployment_job_id
+          default: "${resources.jobs.deploy_champion_job.id}"
 
       environments:
         - environment_key: "default"

@@ -48,7 +48,7 @@ The workload:
 3. `pip install .` so `dais26_dentex.train.cli` is importable (no `-e`; snapshot is read-only).
 4. Launches `torchrun --nproc_per_node=8 -m dais26_dentex.train.cli` across the 8 H100s of one node.
 5. Each rank runs `train_detector(...)` with kwargs read from `$HYPERPARAMETERS_PATH`.
-6. Rank 0 logs the MLflow run, registers the model in UC, and sets `@candidate`.
+6. Rank 0 logs the MLflow run, registers the model in UC, and sets `@challenger`.
 
 ## Override at submit time
 

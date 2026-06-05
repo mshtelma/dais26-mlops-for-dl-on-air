@@ -201,18 +201,3 @@ def get_val_transforms(
         mean=mean if mean is not None else CLIP_MEAN,
         std=std if std is not None else CLIP_STD,
     )
-
-
-def get_cradio_preprocessor(revision: str | None = None):
-    """Return the C-RADIOv4-SO400M CLIP image processor from HuggingFace.
-
-    Args:
-        revision: Optional git revision / tag to pin the processor version.
-    """
-    from transformers import CLIPImageProcessor
-
-    return CLIPImageProcessor.from_pretrained(
-        "nvidia/C-RADIOv4-SO400M",
-        revision=revision,
-        trust_remote_code=True,
-    )

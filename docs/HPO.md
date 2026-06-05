@@ -312,9 +312,9 @@ The collapse was a precision/normalization bug, **not the DINOv3 backbone** — 
 the fix it learns. The full A/B below runs in **fp32 at batch 4** (fp32 activations
 are ~2× bf16, which already sat at ~68% of an 80 GB H100 at batch 8).
 
-To turn that into a measured number, [notebooks/02c_anchor_ab.py](../notebooks/02c_anchor_ab.py)
-runs a **controlled A/B** on `dinov3_vitl16` (it pins the backbone locally; it does
-NOT flip the global `BACKBONE`). Two runs identical except the change bundle, same
+To turn that into a measured number, a **controlled A/B** on `dinov3_vitl16`
+(pinning the backbone locally; it does NOT flip the global `BACKBONE`) was run.
+Two runs identical except the change bundle, same
 `base_seed=42`, `register_model=False`, full-length (`TRAIN_EPOCHS`), on the settled
 recipe (`backbone_mode=full`, `backbone_lr=1e-5`, `lr=1e-4`, `weight_decay=1e-2`,
 `onecycle_pct_start=0.3`, `img_size=1024`):
@@ -322,7 +322,7 @@ recipe (`backbone_mode=full`, `backbone_lr=1e-5`, `lr=1e-4`, `weight_decay=1e-2`
 - **Arm A (baseline):** `anchor_layout=absolute`, class-agnostic NMS.
 - **Arm B (treatment):** `anchor_layout=per_level` (`anchor_base_scale=4.0`), per-class `batched_nms`.
 
-Phase 1 of that notebook first runs `probe_detection_model` on the **real DINOv3
+Phase 1 of that A/B first runs `probe_detection_model` on the **real DINOv3
 encoder** for each arm (confirms the 64x64 token grid aligns and shows positives
 moving off P3 onto P4); Phase 2 dispatches the two `@distributed` 8xH100 arms and
 reads back `val/best_mAP_50`; Phase 3 prints the verdict. The decision rule:

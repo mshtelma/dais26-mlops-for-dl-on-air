@@ -46,7 +46,7 @@ def test_fpn_param_count_reasonable():
 def test_fpn_groupnorm_used_not_batchnorm():
     """Verify GroupNorm (not BatchNorm) for batch-size-1 inference safety."""
     adapter = FPNAdapter(in_channels=1152)
-    has_bn = any(isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d)) for m in adapter.modules())
+    has_bn = any(isinstance(m, torch.nn.BatchNorm1d | torch.nn.BatchNorm2d) for m in adapter.modules())
     has_gn = any(isinstance(m, torch.nn.GroupNorm) for m in adapter.modules())
     assert not has_bn, "FPN must not use BatchNorm"
     assert has_gn, "FPN must use GroupNorm"

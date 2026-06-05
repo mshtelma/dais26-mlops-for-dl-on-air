@@ -75,10 +75,10 @@ selection number. `notebooks/09` now loops over **both** `["val", "test"]`.
 | LoRA rank=8 (STRETCH) | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
 | Per-level (baseline) | C-RADIOv4-SO400M | 0.5219 | TBD | 0.2102 (09b) | TBD | TBD | TBD |
 | Per-level (baseline) | DINOv3-ViTL16 | 0.5181 | 0.285 | TBD (broken reg.) | TBD | TBD | TBD |
-| Campaign best (`useful-mare-854`, 1024/100ep+aug) | C-RADIOv4-SO400M | 0.5648 | 0.291 | TBD (re-eval) | TBD | TBD | TBD |
-| Campaign best (`victorious-goose-410`, 1280+aug) | DINOv3-ViTL16 | 0.5355 | 0.316 | TBD (re-eval) | TBD | TBD | TBD |
-| Campaign candidate | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
-| Campaign candidate | DINOv3-ViTL16 | TBD | TBD | TBD | TBD | TBD | TBD |
+| Campaign best (`dazzling-mole-850`, 150ep) | C-RADIOv4-SO400M | 0.5931 | 0.304 | pending (09) | TBD | TBD | TBD |
+| Campaign best (`capricious-hound-240` v7, fusion×150ep) | DINOv3-ViTL16 | 0.5738 | 0.333 | pending (09) | TBD | TBD | TBD |
+| Campaign candidate (`resilient-moth-415` v11, `@candidate`) | C-RADIOv4-SO400M | 0.5697 | 0.288 | pending (09) | TBD | TBD | TBD |
+| Campaign candidate (`rebellious-gnu-395` v8, `@candidate`) | DINOv3-ViTL16 | 0.5704 | 0.340 | pending (09) | TBD | TBD | TBD |
 | **test split (published)** `@challenger` | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
 | **test split (published)** `@challenger` | DINOv3-ViTL16 | TBD | TBD | TBD | TBD | TBD | TBD |
 

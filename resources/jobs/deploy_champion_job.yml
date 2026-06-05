@@ -1,0 +1,91 @@
+resources:
+  jobs:
+    deploy_champion_job:
+      name: "dais26_deploy_champion_job_${bundle.target}"
+      description: "MLflow 3 deployment job (CHAMPION side) for the prod detector_champion model. A new detector_champion version — created by the challenger-side RegisterChampion task (notebooks/12) copying an approved dev winner into the prod schema — auto-triggers this job via the supported model-version deployment trigger (connect_deployment_job + notebooks/13, target=prod, sets deployment_job_id on detector_champion). It deploys + smoke-tests the @champion_candidate version, flips @champion only on a passing smoke test, then refreshes the reference embeddings (GPU; backbone self-selected from the champion's source_dev_model tag), the Vector Search index, and the drift baseline. Replaces the abandoned MODEL_ALIAS_SET-triggered champion_deploy job (model/alias triggers are Private Preview and unsupported by the Terraform provider; the model-version trigger is GA)."
+      tags:
+        project: "dais26-vfm"
+        component: "deployment-job"
+
+      # One champion deploy at a time; serialize so two promotions don't race the
+      # same endpoint / @champion alias.
+      max_concurrent_runs: 1
+
+      # Endpoint deploy/smoke + GPU embeddings precompute + Vector Search sync +
+      # drift. Sized for the serverless-GPU cold start on precompute_embeddings.
+      timeout_seconds: 7200
+
+      queue:
+        enabled: true
+
+      # Email on success (new champion deployed + endpoint live + refresh done) and
+      # on any task failure (deploy/smoke/refresh error — surfaced immediately since
+      # retries are off).
+      email_notifications:
+        on_success:
+          - "puneet.jain@databricks.com"
+        on_failure:
+          - "puneet.jain@databricks.com"
+        no_alert_for_skipped_runs: true
+
+      # Job-level parameters the MLflow deployment-job framework injects when a new
+      # detector_champion version triggers the run (model_name=the prod champion model,
+      # model_version=the new version). The champion-side tasks resolve the candidate
+      # from the @champion_candidate alias (set by RegisterChampion), so these are
+      # informational here, but kept so the deployment-job framework can populate them.
+      parameters:
+        - name: model_name
+          default: ""
+        - name: model_version
+          default: ""
+
+      # run_as is inherited from the bundle target (var.sp_app_id on prod). The SP
+      # must be able to create/update the serving endpoint, manage the Vector Search
+      # endpoint + index, and write the prod embeddings/drift tables.
+
+      environments:
+        # Serverless CPU for deploy/smoke + VS + drift (driver-only; the endpoint
+        # uses GPU serving compute). Wheel attached via the environments block.
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        # Single serverless GPU for the embeddings precompute (frozen-backbone
+        # forward pass). databricks_ai_v5 is the serverless-GPU base.
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        # No retries on any deployment-job task: fail fast so a deploy/smoke-test or
+        # refresh failure surfaces immediately instead of being masked by a re-run.
+        - task_key: "deploy_champion"
+          notebook_task:
+            notebook_path: "../../notebooks/14_champion_deploy.py"
+          environment_key: "default"
+
+        - task_key: "precompute_embeddings"
+          depends_on:
+            - task_key: "deploy_champion"
+          notebook_task:
+            notebook_path: "../../notebooks/03_precompute_embeddings.py"
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_1xA10
+
+        - task_key: "create_vector_search"
+          depends_on:
+            - task_key: "precompute_embeddings"
+          notebook_task:
+            notebook_path: "../../notebooks/04b_create_vector_search.py"
+          environment_key: "default"
+
+        - task_key: "drift_baseline"
+          depends_on:
+            - task_key: "create_vector_search"
+          notebook_task:
+            notebook_path: "../../notebooks/05_drift_demo.py"
+          environment_key: "default"

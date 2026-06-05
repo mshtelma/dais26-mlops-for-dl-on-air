@@ -96,7 +96,7 @@ def test_manifest_json_has_version_first(tmp_path: Path) -> None:
 
 
 def test_load_v1_manifest_raises_with_migration_hint(tmp_path: Path) -> None:
-    """v1-shaped manifest → typed error mentioning DetectorPyfuncV1."""
+    """v1-shaped manifest → typed error hinting that a re-train is needed."""
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps({"version": 1, "anything": "else"}))
 
@@ -106,7 +106,7 @@ def test_load_v1_manifest_raises_with_migration_hint(tmp_path: Path) -> None:
     err = exc_info.value
     assert err.found == 1
     assert err.expected == ARTIFACT_FORMAT_VERSION
-    assert "DetectorPyfuncV1" in str(err)
+    assert "re-train" in str(err).lower()
 
 
 def test_load_missing_version_raises(tmp_path: Path) -> None:
@@ -121,7 +121,7 @@ def test_load_missing_version_raises(tmp_path: Path) -> None:
 
 
 def test_load_future_version_raises_without_v1_hint(tmp_path: Path) -> None:
-    """A v3 manifest must not advertise the v1 migration path."""
+    """A future-version manifest must not advertise the v1 migration hint."""
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps({"version": 99}))
 
@@ -130,7 +130,7 @@ def test_load_future_version_raises_without_v1_hint(tmp_path: Path) -> None:
 
     err = exc_info.value
     assert err.found == 99
-    assert "DetectorPyfuncV1" not in str(err)
+    assert "re-train" not in str(err).lower()
 
 
 # ----------------------------------------------------------------------

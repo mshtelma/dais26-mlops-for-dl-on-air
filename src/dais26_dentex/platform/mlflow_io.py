@@ -158,12 +158,6 @@ class MlflowReporter:
         self.experiment_name = experiment_name
         self.registry_uri = registry_uri or self.REGISTRY_URI
 
-    def configure(self) -> None:
-        """Set the registry URI + experiment. Idempotent."""
-        mlflow.set_registry_uri(self.registry_uri)
-        if self.experiment_name:
-            mlflow.set_experiment(self.experiment_name)
-
     def log_pyfunc(
         self,
         *,

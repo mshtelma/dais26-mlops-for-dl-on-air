@@ -36,8 +36,15 @@ CACHE_DIR = f"/Volumes/{CATALOG}/{SCHEMA}/{MODEL_CACHE_VOLUME}"
 
 # COMMAND ----------
 # ---- UC Delta tables (all prefixed with TABLE_PREFIX) ----
-TRAIN_EMBEDDINGS_TABLE = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}train_embeddings"
-DRIFT_SCORES_TABLE = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}drift_scores"
+# The embedding + monitoring subsystem (reference embeddings, drift scores) and
+# the Vector Search index (VS_INDEX_NAME below) live in the PROD / champion schema,
+# NOT the dev schema. precompute_embeddings, create_vector_search, and drift_monitor
+# are prod-only jobs (run_as the SP), so their artifacts sit alongside the @champion
+# model rather than being populated by a dev job and read cross-tier from prod. Keep
+# in sync with the targets.prod scoping in
+# resources/jobs/{precompute_embeddings,create_vector_search,drift_monitor}.yml.
+TRAIN_EMBEDDINGS_TABLE = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{TABLE_PREFIX}train_embeddings"
+DRIFT_SCORES_TABLE = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{TABLE_PREFIX}drift_scores"
 DETECTOR_INFERENCE_TABLE = f"{TABLE_PREFIX}detector_inference_payload"
 
 # COMMAND ----------
@@ -76,18 +83,31 @@ DETECTOR_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{DETECTOR_MODEL_SHORT}"
 DETECTOR_LORA_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{DETECTOR_LORA_MODEL_SHORT}"
 EMBEDDER_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{EMBEDDER_MODEL_SHORT}"
 
-# Prod-schema champion model (same backbone-aware short name, prod schema). The
-# deploy job's promote task does copy_model_version(DETECTOR_MODEL_NAME ->
-# CHAMPION_MODEL_NAME) and sets @champion here.
-CHAMPION_MODEL_NAME = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{DETECTOR_MODEL_SHORT}"
+# Prod-schema champion model — SINGLE, backbone-AGNOSTIC. Broad/prod deployment
+# comes from ONE champion model in ONE schema, regardless of which dev backbone
+# (C-RADIOv4 / DINOv3 / ...) won. The dev side keeps backbone-keyed models that
+# compete on the val gate; the winner — whatever its architecture — is copied into
+# this single model and served. So prod is never two competing architecture-named
+# champions. The RegisterChampion task (notebooks/12) does
+# copy_model_version(DETECTOR_MODEL_NAME -> CHAMPION_MODEL_NAME) and tags the source
+# backbone on the prod version; the deploy_champion task (notebooks/14) serves it.
+CHAMPION_MODEL_SHORT = "detector_champion"
+CHAMPION_MODEL_NAME = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{CHAMPION_MODEL_SHORT}"
 
 # COMMAND ----------
 # ---- Serving + Vector Search names ----
+# Dev endpoints are backbone-keyed (per-architecture testing). The PROD champion
+# endpoint is SINGLE and backbone-agnostic: broad deployment serves whatever
+# architecture currently holds @champion from one endpoint (mirrors the single
+# CHAMPION_MODEL_NAME). The deploy_champion task (notebooks/14) deploys here.
 DETECTOR_ENDPOINT_NAME = _detector_names["endpoint"]
+CHAMPION_ENDPOINT_NAME = "dais26-detector-champion"
 EMBEDDER_ENDPOINT_NAME = "dais26-cradio-embedder-dev"
 
 VS_ENDPOINT_NAME = "dais26-vfm-vs"
-VS_INDEX_NAME = f"{CATALOG}.{SCHEMA}.{TABLE_PREFIX}embeddings_index"
+# Index lives in the prod/champion schema alongside the embeddings table it syncs
+# from (created by the prod-only create_vector_search job).
+VS_INDEX_NAME = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{TABLE_PREFIX}embeddings_index"
 
 # COMMAND ----------
 # ---- MLflow experiment ----
@@ -582,5 +602,6 @@ print(f"CACHE_DIR        = {CACHE_DIR}")
 print(f"EXPERIMENT_NAME  = {EXPERIMENT_NAME}")
 print(f"DETECTOR_MODEL   = {DETECTOR_MODEL_NAME}")
 print(f"CHAMPION_MODEL   = {CHAMPION_MODEL_NAME}")
+print(f"CHAMPION_ENDPT   = {CHAMPION_ENDPOINT_NAME}")
 print(f"TRAIN_EMB_TABLE  = {TRAIN_EMBEDDINGS_TABLE}")
 print(f"VS_INDEX_NAME    = {VS_INDEX_NAME}")

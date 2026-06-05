@@ -1,42 +1,44 @@
-resources:
-  jobs:
-    eval_threshold_grid:
-      name: "dais26_eval_threshold_grid_${bundle.target}"
-      description: >-
-        Free (no-retrain) decode/NMS threshold grid over the registered detectors.
-        Mutates the inner DetectionModel's score/nms_iou/max_det attributes across a
-        grid and re-scores the held-out split with COCO mAP, reporting the best free
-        thresholds + Caries AP@50 baseline. Runs 09b_eval_threshold_grid.py on a
-        single serverless GPU. See docs/HPO.md "Push to 0.60" Stage 0.
-      tags:
-        project: "dais26-vfm"
-        component: "evaluation"
-      # GPU queue wait + databricks_ai_v5 cold-start + loading each ViT backbone
-      # dominates; the grid itself is ~18 cheap forward-only passes over 50 images.
-      # 36 forward-only val passes (18 combos x 2 backbones) at 1280px on one A10
-      # run ~95-120 min; the first run took 5777s, a re-run hit the old 7200s cap at
-      # 7152s. Give generous headroom (the backbone forward, not NMS, dominates).
-      timeout_seconds: 14400
-      queue:
-        enabled: true
+targets:
+  dev:
+    resources:
+      jobs:
+        eval_threshold_grid:
+          name: "dais26_eval_threshold_grid_${bundle.target}"
+          description: >-
+            Free (no-retrain) decode/NMS threshold grid over the registered detectors.
+            Mutates the inner DetectionModel's score/nms_iou/max_det attributes across a
+            grid and re-scores the held-out split with COCO mAP, reporting the best free
+            thresholds + Caries AP@50 baseline. Runs 09b_eval_threshold_grid.py on a
+            single serverless GPU. See docs/HPO.md "Push to 0.60" Stage 0.
+          tags:
+            project: "dais26-vfm"
+            component: "evaluation"
+          # GPU queue wait + databricks_ai_v5 cold-start + loading each ViT backbone
+          # dominates; the grid itself is ~18 cheap forward-only passes over 50 images.
+          # 36 forward-only val passes (18 combos x 2 backbones) at 1280px on one A10
+          # run ~95-120 min; the first run took 5777s, a re-run hit the old 7200s cap at
+          # 7152s. Give generous headroom (the backbone forward, not NMS, dominates).
+          timeout_seconds: 14400
+          queue:
+            enabled: true
 
-      environments:
-        - environment_key: "default"
-          spec:
-            environment_version: "3"
-            dependencies:
-              - "../../dist/*.whl"
-        - environment_key: "gpu"
-          spec:
-            base_environment: databricks_ai_v5
-            dependencies:
-              - "../../dist/*.whl"
+          environments:
+            - environment_key: "default"
+              spec:
+                environment_version: "3"
+                dependencies:
+                  - "../../dist/*.whl"
+            - environment_key: "gpu"
+              spec:
+                base_environment: databricks_ai_v5
+                dependencies:
+                  - "../../dist/*.whl"
 
-      tasks:
-        - task_key: "eval_threshold_grid"
-          notebook_task:
-            notebook_path: "../../notebooks/09b_eval_threshold_grid.py"
-          environment_key: "gpu"
-          compute:
-            hardware_accelerator: GPU_1xA10
-          max_retries: 1
+          tasks:
+            - task_key: "eval_threshold_grid"
+              notebook_task:
+                notebook_path: "../../notebooks/09b_eval_threshold_grid.py"
+              environment_key: "gpu"
+              compute:
+                hardware_accelerator: GPU_1xA10
+              max_retries: 1

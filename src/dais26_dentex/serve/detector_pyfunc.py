@@ -1,15 +1,9 @@
-"""MLflow pyfunc wrappers for the detection model.
+"""MLflow pyfunc wrapper for the detection model.
 
-Two classes are exported:
-
-* ``DetectorPyfunc`` — current (v2) consumer. Reads a single
-  ``manifest.json`` artifact (see ``config/manifest.py``).
-* ``DetectorPyfuncV1`` — v1 reader retained for one release so an
-  artifact logged before the v2 cut-over still loads. Will be removed
-  next minor.
-
-Both classes share the same ``predict`` shape so a v1 endpoint URL can
-be swapped to a re-trained v2 artifact without changing the caller.
+``DetectorPyfunc`` reads a single ``manifest.json`` artifact (see
+``config/manifest.py``) and is the only supported consumer. Artifacts
+logged before the manifest-v2 cut-over are no longer loadable — re-train
+with the current code to produce a v2 artifact.
 """
 
 from __future__ import annotations
@@ -25,18 +19,11 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from dais26_dentex.config.constants import (
-    BACKBONE_CONFIG_FILE,
-    DETECTION_CONFIG_FILE,
-    LABEL_MAP_FILE,
-    MANIFEST_FILE,
-    MODEL_STATE_FILE,
-)
+from dais26_dentex.config.constants import MANIFEST_FILE
 from dais26_dentex.config.manifest import load_manifest
 from dais26_dentex.data.transforms import CLIP_MEAN as _CLIP_MEAN_SRC
 from dais26_dentex.data.transforms import CLIP_STD as _CLIP_STD_SRC
 from dais26_dentex.platform.hf_env import configure_hf_env
-from dais26_dentex.serve.postprocess import PostprocessConfig
 
 logger = logging.getLogger(__name__)
 
@@ -261,7 +248,7 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             raise FileNotFoundError(
                 f"Expected '{MANIFEST_FILE}' artifact (key 'manifest'); "
                 f"got keys: {sorted(artifacts.keys())}. "
-                f"For v1 artifacts use DetectorPyfuncV1."
+                f"Pre-manifest-v2 artifacts are no longer supported — re-train to produce a v2 artifact."
             )
         manifest_path = artifacts.get("manifest") or artifacts[MANIFEST_FILE.split(".")[0]]
         manifest = load_manifest(manifest_path)
@@ -308,12 +295,6 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
         model.eval()
         self.model = _maybe_compile(model, device)
         self.device = device
-        # Stash for downstream callers that want to override at predict-time.
-        self.postprocess_cfg = PostprocessConfig(
-            score_threshold=manifest.detector.score_threshold,
-            nms_iou_threshold=manifest.detector.nms_iou_threshold,
-            max_detections=manifest.detector.max_detections,
-        )
 
     def predict(
         self,
@@ -328,79 +309,6 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             input_size=self.input_size,
             mean=self.norm_mean,
             std=self.norm_std,
-            model_input=model_input,
-        )
-
-
-# ----------------------------------------------------------------------
-# v1 (deprecated, kept one release)
-# ----------------------------------------------------------------------
-
-
-class DetectorPyfuncV1(mlflow.pyfunc.PythonModel):
-    """v1 reader — three-sidecar JSON layout (backbone_config /
-    detection_config / label_map).
-
-    Retained for one release so an artifact registered before the
-    manifest-v2 cut-over still loads. Re-train with the current code to
-    move to v2 (a typed manifest + one-file contract). Will be removed
-    in the next minor release.
-    """
-
-    DEFAULT_INPUT_SIZE: int = 1024
-    CLIP_MEAN: ClassVar[list[float]] = _CLIP_MEAN_SRC
-    CLIP_STD: ClassVar[list[float]] = _CLIP_STD_SRC
-
-    def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
-        import json
-
-        artifacts = context.artifacts
-        with open(artifacts[BACKBONE_CONFIG_FILE.split(".")[0]]) as f:
-            backbone_config = json.load(f)
-        with open(artifacts[DETECTION_CONFIG_FILE.split(".")[0]]) as f:
-            detection_config = json.load(f)
-        with open(artifacts[LABEL_MAP_FILE.split(".")[0]]) as f:
-            label_map = json.load(f)
-
-        self.label_map: dict[int, str] = {int(k): v for k, v in label_map.items()}
-        self.input_size = int(detection_config.get("input_size", self.DEFAULT_INPUT_SIZE))
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        cache_dir = artifacts.get("model_cache")
-        offline = cache_dir is not None
-        configure_hf_env(cache_dir, offline=offline)
-
-        model, _info = _build_detection_model(
-            backbone_name=backbone_config["name"],
-            backbone_revision=backbone_config.get("revision"),
-            cache_dir=cache_dir,
-            device=device,
-            num_classes=detection_config["num_classes"],
-            scales=detection_config["scales"],
-            aspect_ratios=detection_config["aspect_ratios"],
-            nms_iou_threshold=detection_config["nms_iou_threshold"],
-            score_threshold=detection_config["score_threshold"],
-            max_detections=detection_config["max_detections"],
-            local_files_only=offline,
-        )
-        _load_state_into(model, artifacts[MODEL_STATE_FILE.split(".")[0]], device)
-        model.eval()
-        self.model = _maybe_compile(model, device)
-        self.device = device
-
-    def predict(
-        self,
-        context: mlflow.pyfunc.PythonModelContext,
-        model_input: pd.DataFrame,
-        params: dict[str, Any] | None = None,
-    ) -> pd.DataFrame:
-        return _predict_batch(
-            model=self.model,
-            device=self.device,
-            label_map=self.label_map,
-            input_size=self.input_size,
-            mean=self.CLIP_MEAN,
-            std=self.CLIP_STD,
             model_input=model_input,
         )
 
@@ -434,6 +342,5 @@ def build_signature_and_example() -> tuple[Any, pd.DataFrame]:
 
 __all__ = [
     "DetectorPyfunc",
-    "DetectorPyfuncV1",
     "build_signature_and_example",
 ]

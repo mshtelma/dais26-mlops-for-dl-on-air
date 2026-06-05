@@ -6,7 +6,7 @@ todos:
     content: Bump mlflow to >=3.1 in pyproject.toml; verify DetectorPyfunc + platform/mlflow_io.py and unit tests still pass; rebuild wheel
     status: pending
   - id: two-schema-config
-    content: "Add a prod/broad champion schema to 00_config (dev models stay in dais26_vfm; champion registers to a separate prod schema); add UC grants so the SP can CREATE MODEL there"
+    content: Add a prod/broad champion schema to 00_config (dev models stay in dais26_vfm; champion registers to a separate prod schema); add UC grants so the SP can CREATE MODEL there
     status: pending
   - id: terminology
     content: "Align aliases to Big Book: dev-schema challenger alias (rename @candidate -> @challenger via constants.py), prod-schema @champion"
@@ -34,7 +34,7 @@ todos:
     status: pending
   - id: docs
     content: Update BENCHMARKS.md (test rows + caveat) and RUNBOOK.md/ARCHITECTURE.md (deployment job + cross-schema promotion + gap/alignment notes)
-    status: pending
+    status: completed
 isProject: false
 ---
 

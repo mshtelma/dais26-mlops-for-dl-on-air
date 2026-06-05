@@ -549,7 +549,7 @@ class TrainerConfig:
 def _coerce_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)):
+    if isinstance(v, int | float):
         return bool(v)
     if isinstance(v, str):
         s = v.strip().lower()

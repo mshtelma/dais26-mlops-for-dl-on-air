@@ -97,10 +97,11 @@ Run this checklist the day before the talk (Sunday June 14). Estimated time: 45 
 
 ## Deployment job (primary promotion path)
 
-The MLflow 3 deployment job `deploy_job_detector` (`resources/jobs/deploy_job_detector.yml`)
-is the primary path from a trained model to a served champion. The standalone
-`deploy_endpoint` job (notebook `04_deploy_serving.py`) is now the break-glass / manual
-redeploy path only.
+Two MLflow 3 deployment jobs — `deploy_job_detector` (challenger side,
+`resources/jobs/deploy_job_detector.yml`) and `deploy_champion_job` (champion side,
+`resources/jobs/deploy_champion_job.yml`) — are the primary path from a trained model to a
+served champion. The standalone `deploy_endpoint` job (notebook `04_deploy_serving.py`) is
+now the break-glass / manual redeploy path only.
 
 ### Dev / prod asset split (two schemas)
 
@@ -108,25 +109,47 @@ Following the Big Book "deploy code" pattern, dev and prod registered models liv
 separate UC schemas (`notebooks/00_config.py`):
 
 - **Dev** — `CATALOG.SCHEMA` (`mlops_pj.dais26_vfm`). Training / the HPO sweep register
-  new versions here and set the dev alias `@challenger` (constant `ALIAS_CANDIDATE`,
-  value `challenger`).
-- **Prod / champion** — `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`).
-  The promote task copies the approved dev version here (lineage preserved) and sets
-  `@champion`. `notebooks/00_setup.py` creates this schema + the SP grants.
+  new versions here under backbone-keyed names (`cradio_detector`, `dinov3_detector`) and
+  set the dev alias `@challenger` (constant `ALIAS_CANDIDATE`, value `challenger`).
+- **Prod / champion** — a **single, backbone-agnostic** model `detector_champion` in
+  `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`), served from a single
+  endpoint `dais26-detector-champion`. Both dev backbones funnel into this one model:
+  RegisterChampion copies the approved dev winner of any architecture here (lineage
+  preserved; tags `source_dev_model`) and sets the staging alias `@champion_candidate`.
+  Creating that new champion **version** auto-triggers the prod champion job
+  (`deploy_champion_job`), which deploys it and flips `@champion`. Broad deployment is
+  therefore from one schema/model — never two competing architecture-named champions.
+  `notebooks/00_setup.py` creates this schema + the SP grants.
 
-### How a release flows
+### How a release flows (two deployment jobs, version-triggered)
+
+Promotion is split across **two** MLflow 3 deployment jobs, each connected (via
+`deployment_job_id`) to the model whose new versions should trigger it:
+
+- **`deploy_job_detector` (challenger side, dev)** — connected to the dev detector models.
+  A new `@challenger` version triggers Evaluation → Approval → RegisterChampion.
+- **`deploy_champion_job` (champion side, prod)** — connected to `detector_champion`. The
+  new champion version that RegisterChampion creates triggers deploy + smoke-test +
+  `@champion` flip → embeddings → Vector Search → drift.
+
+The hand-off between them is the cross-schema copy: RegisterChampion creating a new
+`detector_champion` version is exactly the event that triggers the champion job. The
+champion job only sets aliases + deploys (it never creates new `detector_champion`
+versions), so there is no trigger loop.
 
 1. **Trigger.** The HPO sweep (`02b`) sets `@challenger` on a dev detector model **only
    when** the retrained winner's `val/best_mAP_50` strictly beats the experiment's prior
    best (the challenger registration gate, pure `sweep.beats_experiment_best`). A new
    `@challenger` version auto-triggers `deploy_job_detector` (wired by
-   `connect_deployment_job` / `notebooks/13`, which calls
+   `connect_deployment_job` / `notebooks/13` on `-t dev`, which calls
    `update_registered_model(deployment_job_id=...)` for both dev detectors).
 2. **Evaluation** (`notebooks/10`, GPU `GPU_1xA10` / `databricks_ai_v5`): re-scores the
-   triggered version on the DENTEX **test** split via the shared `eval.runner`, logs
-   `test/*` metrics to the model version, and gates on `mAP@50 ≥ 0.58 AND
-   Caries AP@50 ≥ 0.30` AND best-in-experiment (≥ current prod `@champion` re-scored on
-   test, and ≥ every prior evaluated version). Fails the task otherwise.
+   triggered version on the DENTEX **val** split via the shared `eval.runner`, logs
+   `val/*` metrics to the model version, and gates on the challenger beating the
+   registered `@champion` (re-scored on the same val split) on **≥ 2 of 3** metrics
+   (`mAP_50`, `mAP_75`, `mAP_50_95`). If there is no `@champion` yet, the challenger
+   auto-passes. (The DENTEX 250-image test set ships images only — no public annotations
+   — so promotion is gated on the labeled 50-image val split, not test.)
 3. **Approval** (`notebooks/11`, CPU, `max_retries: 0`): passes only when the UC tag
    `Approval_Check = Approved` is set on the version. To approve:
    ```python
@@ -136,20 +159,49 @@ separate UC schemas (`notebooks/00_config.py`):
                            key="Approval_Check", value="Approved")
    ```
    then repair-run the Approval task.
-4. **Promote** (`notebooks/12`, CPU): `copy_model_version` from dev →
+4. **RegisterChampion** (`notebooks/12`, CPU): `copy_model_version` from dev →
    `CHAMPION_CATALOG.CHAMPION_SCHEMA` (lineage to the source run preserved), then
-   `deploy_and_smoke_test(..., model_version=<new prod version>, promote_on_success=True)`
-   deploys that explicit prod version and flips `@champion` **only** on a passing smoke
-   test. On failure `@champion` is left untouched (previous champion keeps serving).
+   `set_registered_model_alias(..., "champion_candidate", <new prod version>)`. This task
+   does **not** deploy the endpoint or touch `@champion`. The copy creates a new
+   `detector_champion` version → **triggers `deploy_champion_job`** (steps 5–6); the
+   `@champion_candidate` alias tells that job which version to deploy.
+5. **deploy_champion** (`notebooks/14`, CPU, first task of `deploy_champion_job`):
+   `deploy_and_smoke_test(..., candidate_alias="champion_candidate", promote_on_success=True)`
+   resolves the candidate version, deploys/updates the endpoint, smoke-tests it, and flips
+   `@champion` **only** on a passing smoke test. On failure `@champion` is left untouched
+   (previous champion keeps serving). `@champion` always means "verified, live-serving".
+6. **Downstream refresh** (chained after deploy, in `deploy_champion_job`):
+   `precompute_embeddings` (`notebooks/03`, GPU) → `create_vector_search` (`notebooks/04b`,
+   CPU) → `drift_baseline` (`notebooks/05`, CPU) rebuild the reference embeddings, the
+   Vector Search index, and the drift baseline for the new champion. The standalone
+   `precompute_embeddings` / `create_vector_search` jobs were folded into the champion job;
+   `drift_monitor` stays as a separate paused cron for ongoing scheduled monitoring.
+
+> **Why a model-version trigger (not `MODEL_ALIAS_SET`)?** The champion side was originally
+> designed as a separate prod job triggered by `MODEL_ALIAS_SET` on `@champion_candidate`.
+> Job model/alias triggers are in Private Preview and **not supported by the `databricks`
+> Terraform provider** (1.115.0, pinned by the CLI), so `bundle deploy` cannot apply that
+> trigger. The model-**version** deployment trigger (set via `deployment_job_id` on the
+> registered model) **is** GA and provider-supported, so the champion job is connected to
+> `detector_champion` and fires on the RegisterChampion copy instead. Revisit alias triggers
+> once provider support lands.
 
 ### One-time wiring after deploy
 
+`connect_deployment_job` (`notebooks/13`) is **target-aware**:
+
 ```bash
-databricks bundle deploy -t <target>
-databricks bundle run connect_deployment_job -t <target>   # wires deployment_job_id to both dev models
+# dev: connect deploy_job_detector -> dev detector models (cradio_detector, dinov3_detector)
+databricks bundle deploy -t dev
+databricks bundle run connect_deployment_job -t dev
+
+# prod: connect deploy_champion_job -> detector_champion
+databricks bundle deploy -t prod
+databricks bundle run connect_deployment_job -t prod
 ```
 
-Re-run `connect_deployment_job` if `deploy_job_detector` is ever recreated (its id changes).
+`scripts/deploy_bundle.sh -t <target>` runs both steps for you. Re-run
+`connect_deployment_job` if a deployment job is ever recreated (its id changes).
 
 ---
 
@@ -263,12 +315,24 @@ Loading pre-baked checkpoint. Skipping training.
 
 ### Step 2 — Recompute embeddings at dim=768
 
+`precompute_embeddings` is no longer a standalone job — it is a task in the prod
+`deploy_champion_job` (chained after `deploy_champion`). **It self-selects the backbone
+from the live champion**: it reads the `source_dev_model` tag off the `@champion` version
+and reverse-maps it to the architecture (falling back to `BACKBONE` in `00_config` only
+when there is no champion yet), so the embeddings always match whatever architecture is
+serving — no `backbone` param needed. The embeddings (and the VS index + drift baseline)
+refresh automatically on every promotion. To refresh them ad hoc for the current champion,
+run the champion job (optionally just that task):
+
 ```bash
-databricks bundle run precompute_embeddings -t dev \
-  --params backbone=dinov2_base
+# re-run the whole champion job (deploy → embeddings → VS → drift):
+databricks bundle run deploy_champion_job -t prod
+# or run just the embeddings notebook task:
+databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 ```
 
-This rewrites `ml_dev.dais26_vfm.train_embeddings` with 768-dim `ARRAY<FLOAT>` vectors.
+This rewrites `train_embeddings` with the champion backbone's `ARRAY<FLOAT>` vectors
+(dim follows the architecture: C-RADIOv4=1152, DINOv3=1024, DINOv2=768).
 
 ### Step 3 — Recreate the Vector Search index with `embedding_dimension=768`
 
@@ -316,7 +380,7 @@ The drift monitor reads `backbone_info.summary_dim` from `BackboneInfo` automati
 beyond running the monitor once with the new backbone parameter:
 
 ```bash
-databricks bundle run drift_monitor -t dev \
+databricks bundle run drift_monitor -t prod \
   --params backbone=dinov2_base
 ```
 
@@ -477,6 +541,29 @@ account-admin-only; use it instead if you have account-admin access).
 > access list that blocks GitHub-hosted runner IPs (403). Run it locally before
 > pushing (`databricks bundle validate -t dev`), or move it to a self-hosted runner
 > inside the allowed network.
+>
+> **Interim deploy** (until CI can reach the workspace): `deploy.yml` is also
+> blocked by the same IP ACL, so deploy from a machine inside the allowed network
+> with `./scripts/deploy_bundle.sh -t dev` (or `-t prod`). It idempotently ensures
+> the UC schemas exist (`mlops_pj.dais26_vfm`, `mlops_pj.dais26_vfm_prod`), then
+> runs `bundle deploy` + `bundle run connect_deployment_job` — the manual
+> equivalent of the workflow.
+>
+> Schema management is split:
+> - **`dais26_vfm` (dev)** is shared, data-laden infra and is **never** bundle-
+>   managed (dev mode would prefix it to `dev_<user>_dais26_vfm`, and `bundle
+>   destroy` could drop it). The script always ensures it exists.
+> - **`dais26_vfm_prod` (champion)** is **Terraform-managed in the `prod` target
+>   only** (`databricks.yml` → `targets.prod.resources.schemas`); the champion
+>   registered models reference it so Terraform creates the schema first. The
+>   script pre-creates it only for the **dev** target (dev needs it but doesn't
+>   manage it). For `prod` on a workspace where it already exists, bind it once:
+>   `databricks bundle deployment bind dais26_vfm_prod mlops_pj.dais26_vfm_prod -t prod --profile <profile> --auto-approve`
+>   (pass `--profile` if multiple `~/.databrickscfg` profiles match the host). This
+>   has already been done on the current workspace.
+>
+> Keep the script's `SCHEMAS` list and the prod schema resource in sync with
+> `notebooks/00_config.py`.
 
 One-time setup:
 
@@ -786,10 +873,13 @@ dispatches to `Trainer.run()`. Common failures:
 
 ### Hyperparameter sweep + backbone fine-tuning {#hpo-sweep}
 
-The `hpo_sweep` job (`notebooks/02b_hpo_sweep.py`) tunes the detector head and
+The `campaign_sweep` job (`notebooks/02b_hpo_sweep.py`) tunes the detector head and
 fine-tunes the C-RADIO / DINOv3 backbone. It is config-driven from the `SWEEP_*`
 block in `notebooks/00_config.py` and shares the `Trainer` core with the single-run
-path, so anything below applies to both `train_detector` and `hpo_sweep`.
+path, so anything below applies to both `train_detector` and `campaign_sweep`. It is
+the single sweep driver (parametrized by `sweep_stage`); the former `hpo_sweep` job
+has been folded into it, and a trailing `confirm_challenger` task asserts the
+best-in-experiment gate set the `@challenger` alias.
 
 Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in
 `SWEEP_SEARCH_SPACE`, the sgcli yaml, or `00_config.py`):
@@ -806,5 +896,5 @@ Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in
 | Loss diverges immediately when fine-tuning the backbone | `backbone_lr` too high → catastrophic forgetting of the VFM | Keep `backbone_lr` ≈ 1e-5 (10–100× below the head `lr`); the discriminative param groups exist for exactly this |
 | DDP `find_unused_parameters` error | `backbone_mode=full` expects every param to get a grad | Trainer sets `find_unused_parameters=False` only for `full`; for `frozen`/`lora`/`partial` it stays `True` |
 | Fine-tuned weights don't survive serving | backbone weights stripped at load for frozen/LoRA artifacts | The manifest records `backbone.trained_mode`; `detector_pyfunc` keeps the full backbone state only when it is `full`/`partial`. Re-train so the manifest is written by current code |
-| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `hpo_sweep` (and `train_detector`) carry an 8-hour timeout (`timeout_seconds: 28800`); sgcli workloads use `timeout_minutes: 480` |
+| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `campaign_sweep` carries a 48-hour timeout (`timeout_seconds: 172800`); `train_detector` an 8-hour one; sgcli workloads use `timeout_minutes: 480` |
 | Anchor changes have no effect | `anchor_scales`/`aspect_ratios` left unset | `build_detector` only overrides the FPN defaults when both are set; the sweep's `anchor_mode` maps presets onto these fields |

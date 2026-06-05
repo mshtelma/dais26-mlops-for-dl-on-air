@@ -19,6 +19,16 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
+# Optional per-run override of DEPLOY_ACTION. Jobs can pass it as a notebook
+# parameter (e.g. campaign_sweep's `confirm_challenger` task sets
+# deploy_action=register_and_set_candidate to just verify the @challenger alias
+# without deploying). Falls back to the 00_config default when absent/empty.
+dbutils.widgets.text("deploy_action", "")
+_deploy_action_override = dbutils.widgets.get("deploy_action").strip()
+if _deploy_action_override:
+    DEPLOY_ACTION = _deploy_action_override
+
+# COMMAND ----------
 
 full_model = f"{CATALOG}.{SCHEMA}.{DETECTOR_MODEL_SHORT}"
 

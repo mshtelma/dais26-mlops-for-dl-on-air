@@ -1,23 +1,29 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 12 — Deployment job: Promote task (cross-schema, lineage-preserving)
+# MAGIC # 12 — Deployment job: RegisterChampion task (cross-schema, lineage-preserving)
 # MAGIC
-# MAGIC Final task of `deploy_job_detector` (runs after Evaluation + Approval pass).
-# MAGIC It promotes the approved dev `@challenger` version into the separate prod /
-# MAGIC champion schema with full lineage, then points serving at it:
+# MAGIC RegisterChampion task of `deploy_job_detector` (the CHALLENGER-side job; runs
+# MAGIC after Evaluation + Approval pass). It **registers** the approved dev `@challenger`
+# MAGIC version as the prod champion *candidate* — it does NOT deploy the endpoint or flip
+# MAGIC `@champion`. Endpoint deploy + smoke test + the `@champion` flip + the
+# MAGIC embeddings/Vector-Search/drift refresh are owned by the prod CHAMPION-side job
+# MAGIC (`deploy_champion_job`, notebooks/14), which is auto-triggered by the new
+# MAGIC `detector_champion` **version** this task creates (the supported MLflow 3
+# MAGIC model-version deployment trigger; connect_deployment_job wires
+# MAGIC detector_champion.deployment_job_id on -t prod).
 # MAGIC
 # MAGIC 1. `copy_model_version("models:/{model_name}/{model_version}",
 # MAGIC    CHAMPION_FULL)` — creates a new version in the prod-schema registered
 # MAGIC    model as a shallow copy whose version **points back to the source run**,
 # MAGIC    so lineage to the training experiment is preserved (MLflow >= 2.8,
-# MAGIC    UC -> UC same metastore).
-# MAGIC 2. `deploy_and_smoke_test(..., model_version=<new prod version>,
-# MAGIC    promote_on_success=True)` — deploys that explicit prod version to the
-# MAGIC    endpoint, smoke-tests it, and only THEN flips `@champion` on the prod
-# MAGIC    model. On smoke-test failure `@champion` is left untouched (the prior
-# MAGIC    champion keeps serving).
+# MAGIC    UC -> UC same metastore). This version creation is what triggers
+# MAGIC    `deploy_champion_job`.
+# MAGIC 2. `set_registered_model_alias(CHAMPION_FULL, "champion_candidate", <new prod
+# MAGIC    version>)` — `deploy_champion_job` resolves this alias, deploys the candidate,
+# MAGIC    smoke-tests it, and flips `@champion` only on success, so the prior champion
+# MAGIC    keeps serving until a new one is verified live.
 # MAGIC
-# MAGIC No GPU on the driver (the endpoint uses GPU serving compute); serverless CPU.
+# MAGIC No GPU on the driver; serverless CPU.
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -32,7 +38,7 @@ dbutils.library.restartPython()
 import mlflow
 from mlflow.tracking import MlflowClient
 
-from dais26_dentex.serve.endpoint_manager import deploy_and_smoke_test
+from dais26_dentex.config.constants import ALIAS_CHAMPION_CANDIDATE
 
 mlflow.set_registry_uri("databricks-uc")
 
@@ -46,20 +52,18 @@ if not MODEL_NAME or not MODEL_VERSION:
         f"(got model_name={MODEL_NAME!r}, model_version={MODEL_VERSION!r})."
     )
 
-# Prod champion model = same short (last) name in the prod/champion schema; the
-# serving endpoint is the per-backbone one mapped in 00_config.
-_short = MODEL_NAME.split(".")[-1]
-CHAMPION_FULL = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{_short}"
-_endpoint = next(
-    (names["endpoint"] for names in _DETECTOR_NAMES_BY_BACKBONE.values() if names["model_short"] == _short),
-    DETECTOR_ENDPOINT_NAME,
-)
-print(f"Promoting {MODEL_NAME} v{MODEL_VERSION} -> {CHAMPION_FULL}; endpoint {_endpoint}")
+# SINGLE backbone-agnostic prod champion model (CHAMPION_MODEL_NAME from 00_config).
+# The dev winner of ANY architecture is copied into this one model, so prod is never
+# two competing architecture-named champions. Capture the source dev short name so we
+# can tag which backbone the promoted version came from.
+CHAMPION_FULL = CHAMPION_MODEL_NAME
+_source_short = MODEL_NAME.split(".")[-1]
+print(f"Registering {MODEL_NAME} v{MODEL_VERSION} -> {CHAMPION_FULL} as @{ALIAS_CHAMPION_CANDIDATE}")
 
 client = MlflowClient(registry_uri="databricks-uc")
 
 # COMMAND ----------
-# ---- 1. Lineage-preserving cross-schema copy (dev -> prod/champion schema) ----
+# ---- 1. Lineage-preserving cross-schema copy (dev -> single prod/champion model) ----
 copied = client.copy_model_version(
     src_model_uri=f"models:/{MODEL_NAME}/{MODEL_VERSION}",
     dst_name=CHAMPION_FULL,
@@ -67,32 +71,33 @@ copied = client.copy_model_version(
 prod_version = str(copied.version)
 print(f"Copied to {CHAMPION_FULL} v{prod_version} (lineage to source run preserved).")
 
-# COMMAND ----------
-# ---- 2. Deploy that prod version + smoke test; flip @champion only on success ----
-result = deploy_and_smoke_test(
-    endpoint_name=_endpoint,
-    catalog=CHAMPION_CATALOG,
-    schema=CHAMPION_SCHEMA,
-    model_name=_short,
-    model_version=prod_version,
-    workload_size=DEPLOY_WORKLOAD_SIZE,
-    workload_type=DEPLOY_WORKLOAD_TYPE,
-    scale_to_zero=DEPLOY_SCALE_TO_ZERO,
-    promote_on_success=True,
+# Record the source dev model on the prod version so operators (and the downstream
+# embeddings/Vector-Search refresh) can tell which architecture this champion uses.
+client.set_model_version_tag(
+    name=CHAMPION_FULL,
+    version=prod_version,
+    key="source_dev_model",
+    value=MODEL_NAME,
 )
-print(result)
 
-if not (result.smoke_test_passed and result.promoted_to_champion):
-    raise RuntimeError(
-        f"Promotion failed: smoke_passed={result.smoke_test_passed} "
-        f"promoted={result.promoted_to_champion} state={result.state} error={result.error}. "
-        f"@champion on {CHAMPION_FULL} left untouched (previous champion still serves)."
-    )
-
+# COMMAND ----------
+# ---- 2. Stage @champion_candidate for the prod deploy_champion_job ----
+# The copy above already created a new detector_champion version, which triggers
+# deploy_champion_job (notebooks/14_champion_deploy.py). That job resolves
+# @champion_candidate, deploys + smoke-tests the endpoint, flips @champion only on
+# success, then refreshes embeddings / Vector Search / drift. We deliberately do NOT
+# touch @champion here, so the previous champion keeps serving until the new candidate
+# is verified live. (Set the alias before the trigger job's cold start finishes.)
+client.set_registered_model_alias(
+    name=CHAMPION_FULL,
+    alias=ALIAS_CHAMPION_CANDIDATE,
+    version=prod_version,
+)
 print(
-    f"Promoted {CHAMPION_FULL} v{prod_version} to @champion and deployed to {_endpoint} "
-    f"(previous champion: {result.previous_champion})."
+    f"Set @{ALIAS_CHAMPION_CANDIDATE} -> {CHAMPION_FULL} v{prod_version}. "
+    f"The prod deploy_champion_job (triggered by this new version) will deploy + "
+    f"smoke-test it and flip @champion on success."
 )
 dbutils.jobs.taskValues.set(key="champion_model", value=CHAMPION_FULL)
-dbutils.jobs.taskValues.set(key="champion_version", value=prod_version)
+dbutils.jobs.taskValues.set(key="champion_candidate_version", value=prod_version)
 dbutils.notebook.exit("ok")

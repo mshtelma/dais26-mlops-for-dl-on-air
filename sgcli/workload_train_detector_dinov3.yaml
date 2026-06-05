@@ -75,9 +75,9 @@ parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
   img_size: 1024                   # train_detector default; no notebook override
   # Anchor geometry + NMS (the proposed detection-head fix). Defaulted to the
   # `per_level` treatment so an sgcli launch reproduces the post-fix recipe;
-  # the controlled A/B that justifies these values lives in
-  # notebooks/02c_anchor_ab.py (see docs/HPO.md "DINOv3 A/B"). Set
-  # anchor_layout: absolute + nms_per_class: false to reproduce the legacy model.
+  # the controlled A/B that justifies these values is documented in
+  # docs/HPO.md ("DINOv3 A/B"). Set anchor_layout: absolute + nms_per_class:
+  # false to reproduce the legacy model.
   anchor_layout: per_level         # stride-scaled RetinaNet anchors (was absolute)
   anchor_base_scale: 4.0           # per-level base = stride x base_scale
   nms_per_class: true              # per-class batched_nms (co-located lesion/tooth)

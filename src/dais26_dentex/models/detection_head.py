@@ -361,20 +361,6 @@ class DetectionModel(nn.Module):
         anchors = self.anchor_gen(fmap)
         return cls_logits, box_reg, anchors
 
-    @classmethod
-    def from_mlflow(cls, model_uri: str) -> DetectionModel:
-        """Load a serialized DetectionModel from MLflow UC registry.
-
-        Note: this returns the inner DetectionModel; the MLflow pyfunc wrapper lives in
-        src/dais26_dentex/serve/detector_pyfunc.py.
-        """
-        import mlflow
-
-        loaded = mlflow.pytorch.load_model(model_uri)
-        if not isinstance(loaded, cls):
-            raise TypeError(f"Expected {cls.__name__}, got {type(loaded).__name__}")
-        return loaded
-
 
 def calibrate_anchors(
     coco_annotations_path: str,

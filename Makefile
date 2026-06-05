@@ -24,8 +24,8 @@ bundle-deploy-dev:                 ## Deploy UC + jobs (NOT endpoints; endpoints
 bundle-run-train:                  ## Run training job: train + register + deploy endpoint via SDK
 	databricks bundle run train_detector -t dev
 
-bundle-run-embeddings:             ## Run embedding precompute on dev
-	databricks bundle run precompute_embeddings -t dev
+bundle-run-embeddings:             ## Run embedding precompute (champion job task, prod)
+	databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 
 bundle-run-drift:                  ## Run drift monitor on dev
 	databricks bundle run drift_monitor -t dev

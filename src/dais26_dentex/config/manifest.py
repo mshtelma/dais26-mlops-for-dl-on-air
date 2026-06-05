@@ -45,8 +45,8 @@ class IncompatibleArtifactError(ValueError):
     """Raised when a manifest's ``version`` is not the one we can load.
 
     Carries enough context for the operator to know what's needed: the
-    artifact's claimed version, the version we expected, and a hint about
-    the v1 → v2 migration (``DetectorPyfuncV1``).
+    artifact's claimed version, the version we expected, and a hint to
+    re-train when an older (v1) artifact is encountered.
     """
 
     def __init__(self, found: int | None, expected: int, *, hint: str = "") -> None:
@@ -146,12 +146,10 @@ def load_manifest(path: str | Path) -> Manifest:
         raise ValueError(f"manifest.json must be a JSON object; got {type(raw).__name__}")
 
     found_raw = raw.get("version")
-    found: int | None = int(found_raw) if isinstance(found_raw, (int, str)) and str(found_raw).isdigit() else None
+    found: int | None = int(found_raw) if isinstance(found_raw, int | str) and str(found_raw).isdigit() else None
     if found != ARTIFACT_FORMAT_VERSION:
         hint = (
-            "v1 artifacts are still loadable via "
-            "`dais26_dentex.serve.detector_pyfunc.DetectorPyfuncV1`; re-train "
-            "to produce v2."
+            "Pre-manifest-v2 (v1) artifacts are no longer loadable; re-train to produce v2."
             if found in (1, None)
             else ""
         )

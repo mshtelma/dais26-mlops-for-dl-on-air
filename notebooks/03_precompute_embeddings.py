@@ -14,6 +14,38 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
+# ---- Resolve the backbone from the LIVE champion (not the static config) ----
+# The prod champion is a single backbone-agnostic model; whichever architecture
+# currently holds @champion may differ from BACKBONE in 00_config. RegisterChampion
+# (notebooks/12) tags the prod version with `source_dev_model`, so we reverse-map
+# that to the backbone here and embed with the matching feature extractor. Falls
+# back to BACKBONE when there is no champion yet / no tag (e.g. first run, or a
+# standalone dev invocation).
+from mlflow.tracking import MlflowClient
+
+from dais26_dentex.config.champion import (
+    SOURCE_DEV_MODEL_TAG,
+    resolve_backbone_from_source_model,
+)
+
+_source_dev_model = None
+try:
+    _champ_mv = MlflowClient(registry_uri="databricks-uc").get_model_version_by_alias(
+        name=CHAMPION_MODEL_NAME, alias="champion"
+    )
+    _source_dev_model = (_champ_mv.tags or {}).get(SOURCE_DEV_MODEL_TAG)
+except Exception as e:
+    print(f"No resolvable @champion ({type(e).__name__}: {e}); falling back to BACKBONE={BACKBONE}")
+
+EFFECTIVE_BACKBONE = resolve_backbone_from_source_model(
+    _source_dev_model, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
+)
+print(
+    f"Embeddings backbone = {EFFECTIVE_BACKBONE} "
+    f"(champion source_dev_model={_source_dev_model}, config BACKBONE={BACKBONE})"
+)
+
+# COMMAND ----------
 
 from dais26_dentex.train.precompute_embeddings import precompute_embeddings
 
@@ -22,7 +54,7 @@ n = precompute_embeddings(
     catalog=CATALOG,
     schema=SCHEMA,
     volume_path=VOLUME_PATH,
-    backbone_name=BACKBONE,  # type: ignore[arg-type]
+    backbone_name=EFFECTIVE_BACKBONE,  # type: ignore[arg-type]
     backbone_revision=BACKBONE_REVISION,
     cache_dir=CACHE_DIR,
     batch_size=EMBEDDINGS_BATCH_SIZE,
@@ -62,9 +94,9 @@ try:
     fig = px.scatter(
         df, x="umap_x", y="umap_y", color="diagnosis",
         symbol="split", hover_data=["image_id", "image_path"],
-        title=f"UMAP of {BACKBONE} embeddings ({len(df)} images)",
+        title=f"UMAP of {EFFECTIVE_BACKBONE} embeddings ({len(df)} images)",
         height=600,
     )
     fig.show()
-except Exception as e:  # noqa: BLE001 — viz is best-effort, embeddings already written
+except Exception as e:
     print(f"[viz skipped] UMAP/plotly visualization failed (non-fatal): {e}")

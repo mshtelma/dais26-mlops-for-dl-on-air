@@ -1,24 +1,27 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 10 — Deployment job: Evaluation task
+# MAGIC # 10 — Deployment job: Evaluation task (champion-relative validation gate)
 # MAGIC
 # MAGIC First task of the `deploy_job_detector` MLflow 3 deployment job. A new
 # MAGIC `@challenger` version on a dev detector model auto-triggers the job with
 # MAGIC job parameters `model_name` (full dev UC name) + `model_version`; this task:
 # MAGIC
-# MAGIC 1. loads `models:/{model_name}/{model_version}` and re-scores it on the
-# MAGIC    DENTEX **test** split (250 imgs) through the serving pyfunc + COCO eval
-# MAGIC    (shared `eval.runner.score_model_on_split`, same code as 09).
-# MAGIC 2. logs the test metrics to the model version (MLflow 3 LoggedModel) so they
-# MAGIC    surface on the version page + feed the best-in-experiment check.
-# MAGIC 3. **gates** on `mAP_50 >= 0.58 AND Caries AP@50 >= 0.30`
-# MAGIC    ([docs/BENCHMARKS.md](../docs/BENCHMARKS.md)) AND best-in-experiment:
-# MAGIC    the candidate's test `mAP_50` must be `>=` the current prod `@champion`'s
-# MAGIC    test `mAP_50` and every prior evaluated version's. Raises (fails the task)
-# MAGIC    otherwise, so a worse challenger never reaches approval/promotion.
+# MAGIC 1. loads `models:/{model_name}/{model_version}` and scores it on the labeled
+# MAGIC    DENTEX **val** split (50 imgs) through the serving pyfunc + COCO eval
+# MAGIC    (shared `eval.runner.score_model_on_split`). We gate on **val**, NOT test:
+# MAGIC    the 250-image DENTEX test split ships with **no public ground-truth
+# MAGIC    annotations**, so COCO mAP on test is meaningless (COCOeval returns -1).
+# MAGIC 2. logs the val metrics to the model version (MLflow 3 LoggedModel) + an eval
+# MAGIC    run so they surface on the version page.
+# MAGIC 3. **gates champion-relative**: the challenger must beat the current prod
+# MAGIC    `@champion` (re-scored on the SAME val split, head-to-head) on **>= 2 of 3**
+# MAGIC    metrics — `mAP_50`, `mAP_75`, `mAP_50_95` (strictly greater). If there is
+# MAGIC    **no current champion**, the challenger auto-passes (first promotion). A
+# MAGIC    challenger that wins on < 2 of 3 raises and fails the task, so it never
+# MAGIC    reaches Approval / RegisterChampion.
 # MAGIC
 # MAGIC Requires a **GPU** (the ViT backbone loads onto CUDA); the job runs this task
-# MAGIC on `GPU_1xA10` + `base_environment databricks_ai_v5` (mirrors 09).
+# MAGIC on `GPU_1xA10` + `base_environment databricks_ai_v5`.
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -37,11 +40,13 @@ from dais26_dentex.eval.runner import score_model_on_split
 
 mlflow.set_registry_uri("databricks-uc")
 
-# ---- Gate thresholds (docs/BENCHMARKS.md per-backbone 0.60 campaign gate) ----
-MAP50_THRESHOLD = 0.58
-CARIES_AP50_THRESHOLD = 0.30
-CARIES_CLASS = "Caries"
-EVAL_SPLIT = "test"
+# ---- Champion-relative gate config ----
+# Gate the challenger ONLY against the reigning @champion on the labeled val split.
+# No absolute thresholds and no best-in-experiment bar: the single question is
+# "is this challenger better than what's live?" measured head-to-head on val.
+EVAL_SPLIT = "val"  # val has GT (50 imgs); test (250) has no public annotations.
+GATE_METRICS = ["mAP_50", "mAP_75", "mAP_50_95"]
+WINS_REQUIRED = 2  # challenger must STRICTLY beat champion on >= 2 of the 3 metrics.
 
 # ---- Job params: full dev model name + numeric version (deployment-job inputs) ----
 dbutils.widgets.text("model_name", "")
@@ -53,36 +58,36 @@ if not MODEL_NAME or not MODEL_VERSION:
         "model_name and model_version job parameters are required "
         f"(got model_name={MODEL_NAME!r}, model_version={MODEL_VERSION!r})."
     )
+MODEL_SHORT = MODEL_NAME.split(".")[-1]
 print(f"Evaluating {MODEL_NAME} v{MODEL_VERSION} on '{EVAL_SPLIT}'")
 
 client = MlflowClient(registry_uri="databricks-uc")
 
-# Prod champion model = same short (last) name in the prod/champion schema.
-_short = MODEL_NAME.split(".")[-1]
-CHAMPION_FULL = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{_short}"
+# SINGLE backbone-agnostic prod champion model (CHAMPION_MODEL_NAME from 00_config).
+# The challenger competes against the one reigning champion regardless of architecture,
+# so prod never carries two competing architecture-named champions.
+CHAMPION_FULL = CHAMPION_MODEL_NAME
 
 # COMMAND ----------
-# ---- Score the candidate version on the test split ----
+# ---- Score the candidate version on the val split ----
 candidate = mlflow.pyfunc.load_model(f"models:/{MODEL_NAME}/{MODEL_VERSION}")
-metrics = score_model_on_split(candidate, VOLUME_PATH, EVAL_SPLIT)
+cand_metrics = score_model_on_split(candidate, VOLUME_PATH, EVAL_SPLIT)
 del candidate
 
-cand_map50 = float(metrics["mAP_50"])
-cand_caries = float(metrics["per_class_AP50"].get(CARIES_CLASS, 0.0))
-print(f"Candidate test metrics: mAP_50={cand_map50:.4f} Caries AP@50={cand_caries:.4f}")
-print(f"  per-class AP@50: {metrics['per_class_AP50']}")
+cand_scores = {m: float(cand_metrics[m]) for m in GATE_METRICS}
+print(f"Candidate {EVAL_SPLIT} metrics: " + ", ".join(f"{m}={cand_scores[m]:.4f}" for m in GATE_METRICS))
+print(f"  per-class AP@50: {cand_metrics['per_class_AP50']}")
 
 # Flat, MLflow-metric-safe view (drop the nested per_class dict; flatten it).
-flat_metrics = {f"{EVAL_SPLIT}/{k}": float(v) for k, v in metrics.items() if isinstance(v, (int, float))}
-for cls_name, ap in metrics["per_class_AP50"].items():
+flat_metrics = {f"{EVAL_SPLIT}/{k}": float(v) for k, v in cand_metrics.items() if isinstance(v, int | float)}
+for cls_name, ap in cand_metrics["per_class_AP50"].items():
     flat_metrics[f"{EVAL_SPLIT}/AP50_{cls_name.replace(' ', '_')}"] = float(ap)
 
 # COMMAND ----------
-# ---- Log metrics to the model version (MLflow 3 LoggedModel) ----
+# ---- Log metrics to the model version (MLflow 3 LoggedModel) + an eval run ----
 # The version page surfaces metrics logged against the LoggedModel id. We resolve
 # it from the ModelVersion and log there when MLflow 3 supports `model_id=`; we
-# also log to an eval run (tagged with the model+version) so the best-in-experiment
-# search below has a uniform place to read prior versions' test scores from.
+# also log to an eval run (tagged with the model+version) for traceability.
 mlflow.set_experiment(EXPERIMENT_NAME)
 
 _logged_model_id = None
@@ -92,7 +97,7 @@ try:
 except Exception as e:
     print(f"Could not resolve LoggedModel id for {MODEL_NAME} v{MODEL_VERSION}: {type(e).__name__}: {e}")
 
-with mlflow.start_run(run_name=f"deploy-eval-{_short}-v{MODEL_VERSION}"):
+with mlflow.start_run(run_name=f"deploy-eval-{MODEL_SHORT}-v{MODEL_VERSION}"):
     mlflow.set_tags(
         {
             "deploy_eval": "true",
@@ -105,88 +110,60 @@ with mlflow.start_run(run_name=f"deploy-eval-{_short}-v{MODEL_VERSION}"):
     if _logged_model_id is not None:
         try:
             mlflow.log_metrics(flat_metrics, model_id=_logged_model_id)
-            print(f"Logged test metrics to LoggedModel {_logged_model_id}")
+            print(f"Logged {EVAL_SPLIT} metrics to LoggedModel {_logged_model_id}")
         except TypeError:
             # Older client without `model_id=`; run-level metrics already logged.
             print("mlflow.log_metrics has no model_id kwarg; logged to the eval run only.")
 
 # COMMAND ----------
-# ---- Gate 1: absolute thresholds ----
-threshold_failures = []
-if cand_map50 < MAP50_THRESHOLD:
-    threshold_failures.append(f"mAP_50 {cand_map50:.4f} < {MAP50_THRESHOLD}")
-if cand_caries < CARIES_AP50_THRESHOLD:
-    threshold_failures.append(f"Caries AP@50 {cand_caries:.4f} < {CARIES_AP50_THRESHOLD}")
-
-# COMMAND ----------
-# ---- Gate 2: best-in-experiment (>= current champion AND prior evaluated versions) ----
-# Compare against (a) the current prod @champion re-scored on test (head-to-head,
-# authoritative) and (b) any prior version's logged test/mAP_50 in this experiment.
-# Missing comparators are treated as "no prior bar" — the candidate is best by
-# default (e.g. very first version, or no champion yet).
-prior_best = -1.0
-prior_best_source = "none"
-
-
-def _consider(source: str, value: float | None) -> None:
-    global prior_best, prior_best_source
-    if value is not None and value > prior_best:
-        prior_best = value
-        prior_best_source = source
-
-
-# (a) Current prod champion, re-scored on test for an apples-to-apples number.
+# ---- Resolve the current @champion and re-score it head-to-head on val ----
+# "No current champion" (alias not set / model absent) => challenger auto-passes
+# (this is the first promotion). If a champion DOES exist but cannot be scored, we
+# let the error propagate (fail loudly) rather than silently auto-passing a possible
+# regression.
+champ_mv = None
 try:
     champ_mv = client.get_model_version_by_alias(name=CHAMPION_FULL, alias="champion")
-    print(f"Current @champion: {CHAMPION_FULL} v{champ_mv.version}; re-scoring on '{EVAL_SPLIT}'")
+except Exception as e:
+    print(f"No current @champion on {CHAMPION_FULL} ({type(e).__name__}: {e}); challenger auto-passes.")
+
+champ_scores: dict[str, float] = {}
+if champ_mv is not None:
+    print(f"Current @champion: {CHAMPION_FULL} v{champ_mv.version}; re-scoring on '{EVAL_SPLIT}' head-to-head")
     champ_model = mlflow.pyfunc.load_model(f"models:/{CHAMPION_FULL}@champion")
     champ_metrics = score_model_on_split(champ_model, VOLUME_PATH, EVAL_SPLIT)
     del champ_model
-    _consider(f"champion v{champ_mv.version}", float(champ_metrics["mAP_50"]))
-except Exception as e:
-    print(f"No comparable @champion ({type(e).__name__}: {e}); skipping champion bar.")
-
-# (b) Prior evaluated versions of THIS dev model in the experiment.
-try:
-    runs = mlflow.search_runs(
-        experiment_names=[EXPERIMENT_NAME],
-        filter_string=(
-            f"tags.deploy_eval = 'true' and tags.eval_model_name = '{MODEL_NAME}' "
-            f"and tags.eval_split = '{EVAL_SPLIT}'"
-        ),
-        output_format="list",
-    )
-    for r in runs:
-        if r.data.tags.get("eval_model_version") == MODEL_VERSION:
-            continue  # don't compare the candidate against itself
-        _consider(
-            f"version {r.data.tags.get('eval_model_version')}",
-            r.data.metrics.get(f"{EVAL_SPLIT}/mAP_50"),
-        )
-except Exception as e:
-    print(f"Prior-version search failed ({type(e).__name__}: {e}); skipping that bar.")
-
-print(f"Best prior test mAP_50 = {prior_best:.4f} (source: {prior_best_source})")
-
-best_in_experiment = cand_map50 >= prior_best
+    champ_scores = {m: float(champ_metrics[m]) for m in GATE_METRICS}
+    print("Champion " + EVAL_SPLIT + " metrics: " + ", ".join(f"{m}={champ_scores[m]:.4f}" for m in GATE_METRICS))
 
 # COMMAND ----------
-# ---- Decide ----
-if threshold_failures or not best_in_experiment:
-    msg = ["Evaluation gate FAILED."]
-    if threshold_failures:
-        msg.append("Thresholds: " + "; ".join(threshold_failures))
-    if not best_in_experiment:
-        msg.append(
-            f"Not best-in-experiment: candidate mAP_50 {cand_map50:.4f} < "
-            f"prior best {prior_best:.4f} ({prior_best_source})."
-        )
-    raise RuntimeError(" ".join(msg))
+# ---- Decide: champion-relative, >= 2 of 3 strict wins (or auto-pass if no champion) ----
+if champ_mv is None:
+    print(
+        f"Evaluation gate PASSED (no champion): challenger {EVAL_SPLIT} "
+        + ", ".join(f"{m}={cand_scores[m]:.4f}" for m in GATE_METRICS)
+    )
+else:
+    wins = [m for m in GATE_METRICS if cand_scores[m] > champ_scores[m]]
+    print("Head-to-head (challenger vs champion):")
+    for m in GATE_METRICS:
+        verdict = "WIN " if cand_scores[m] > champ_scores[m] else "lose"
+        print(f"  {m:>9}: {cand_scores[m]:.4f} vs {champ_scores[m]:.4f}  -> {verdict}")
+    print(f"Challenger wins {len(wins)}/{len(GATE_METRICS)} (need >= {WINS_REQUIRED}): {wins}")
 
-print(
-    f"Evaluation gate PASSED: mAP_50={cand_map50:.4f} (>= {MAP50_THRESHOLD} and >= prior "
-    f"best {prior_best:.4f}), Caries AP@50={cand_caries:.4f} (>= {CARIES_AP50_THRESHOLD})."
-)
-dbutils.jobs.taskValues.set(key="test_mAP_50", value=cand_map50)
-dbutils.jobs.taskValues.set(key="test_Caries_AP50", value=cand_caries)
+    if len(wins) < WINS_REQUIRED:
+        raise RuntimeError(
+            f"Evaluation gate FAILED: challenger beat @champion v{champ_mv.version} on only "
+            f"{len(wins)}/{len(GATE_METRICS)} metrics ({wins}); need >= {WINS_REQUIRED}. "
+            "Challenger discarded (no promotion)."
+        )
+    print(
+        f"Evaluation gate PASSED: challenger beat @champion v{champ_mv.version} on "
+        f"{len(wins)}/{len(GATE_METRICS)} metrics ({wins})."
+    )
+
+# COMMAND ----------
+# ---- Hand validated metrics to downstream tasks ----
+for m in GATE_METRICS:
+    dbutils.jobs.taskValues.set(key=f"{EVAL_SPLIT}_{m}", value=cand_scores[m])
 dbutils.notebook.exit("ok")

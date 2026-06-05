@@ -49,7 +49,6 @@ from dais26_dentex.data.dataset import (
 from dais26_dentex.data.dentex_loader import get_label_map
 from dais26_dentex.data.transforms import get_train_transforms, get_val_transforms
 from dais26_dentex.distributed.primitives import (
-    BarrierTimeoutError,
     is_distributed,
     is_rank0,
     maybe_distributed_sampler,
@@ -68,7 +67,7 @@ from dais26_dentex.models.detection_head import (
     DetectionModel,
 )
 from dais26_dentex.models.targets import build_targets_for_batch
-from dais26_dentex.platform.mlflow_io import AliasingError, MlflowReporter
+from dais26_dentex.platform.mlflow_io import MlflowReporter
 from dais26_dentex.platform.uc import UCName
 from dais26_dentex.serve.detector_pyfunc import build_signature_and_example
 from dais26_dentex.train.losses import detection_loss
@@ -766,4 +765,4 @@ class Trainer:
             safe_barrier(self.cfg.barrier_timeout_seconds)
 
 
-__all__ = ["AliasingError", "BarrierTimeoutError", "Trainer"]
+__all__ = ["Trainer"]

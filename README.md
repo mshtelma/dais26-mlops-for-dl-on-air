@@ -36,8 +36,8 @@ pip install uv && uv pip install -e ".[dev]"
 databricks auth login --host <DATABRICKS_HOST>
 uv build                                       # ships pyproject.toml inside the wheel for serving-deps lookup
 databricks bundle deploy -t dev               # deploys UC + jobs (NOT endpoints)
-databricks bundle run train_detector -t dev   # trains + @candidate + endpoint via SDK + @champion
-databricks bundle run precompute_embeddings -t dev
+databricks bundle run train_detector -t dev   # trains + @challenger + endpoint via SDK + @champion
+databricks bundle run deploy_champion_job -t prod     # embeddings/index/drift live in the prod (champion) schema
 ```
 
 Full 11-step sequence with smoke tests and prerequisites: [docs/README.md](docs/README.md)
@@ -92,11 +92,15 @@ Two phases — `bundle deploy` handles infrastructure; endpoints are SDK-driven.
 bundle deploy -t dev
   |-- UC catalog / schema / volumes / secret scope
   |-- MLflow experiment
-  |-- Job definitions (train_detector, precompute_embeddings, drift_monitor)
+  |-- Dev job definitions (train_detector, campaign_sweep, eval_comparison, eval_threshold_grid)
   `-- (NO serving endpoints)
 
+bundle deploy -t prod
+  |-- Champion schema (dais26_vfm_prod) + champion models + deployment job
+  `-- Prod-only embedding/monitoring jobs (precompute_embeddings, create_vector_search, drift_monitor)
+
 bundle run train_detector -t dev
-  setup --> train --> register @candidate --> deploy endpoint (SDK) --> smoke test --> @champion
+  setup --> train --> register @challenger --> deploy endpoint (SDK) --> smoke test --> @champion
 ```
 
 Endpoints are never created before a model version exists. The detector pyfunc is logged via
@@ -104,13 +108,19 @@ Endpoints are never created before a model version exists. The detector pyfunc i
 `code_paths` — pickling the instance captured a `trust_remote_code` `transformers_modules.*`
 backbone reference the serving container cannot import. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-Three standalone jobs let you re-run a single phase without the full `train_detector` chain:
+These standalone jobs let you re-run a single phase (or run the governed promotion path) without the full `train_detector` chain:
 
-| Job | Notebook | Purpose |
-|-----|----------|---------|
-| `deploy_endpoint` | `04_deploy_serving.py` | (Re)deploy `@candidate` → endpoint → smoke test → `@champion` |
-| `create_vector_search` | `04b_create_vector_search.py` | Create VS endpoint + DELTA_SYNC index over the embeddings table, sync, smoke-test query |
-| `precompute_embeddings` | `03_precompute_embeddings.py` | Write the `summary`-embedding Delta table (prerequisite for `create_vector_search`) |
+| Job | Target | Notebook | Purpose |
+|-----|--------|----------|---------|
+| `deploy_endpoint` | dev + prod | `04_deploy_serving.py` | (Re)deploy `@challenger` → endpoint → smoke test → `@champion` |
+| `create_vector_search` | **prod** | `04b_create_vector_search.py` | Create VS endpoint + DELTA_SYNC index over the prod-schema embeddings table, sync, smoke-test query |
+| `precompute_embeddings` | **prod** | `03_precompute_embeddings.py` | Write the `summary`-embedding Delta table in the prod (champion) schema (prerequisite for `create_vector_search`) |
+| `deploy_job_detector` | dev + prod | `10`–`14` | **Primary** promotion path (MLflow 3 deployment job): eval on test → approval → cross-schema champion promote + deploy |
+| `connect_deployment_job` | dev + prod | `13_connect_deployment_job.py` | One-time wiring: set `deployment_job_id` on the dev detector models so a new `@challenger` auto-triggers `deploy_job_detector` |
+
+The embedding/monitoring subsystem (`precompute_embeddings`, `create_vector_search`,
+`drift_monitor`) is **prod-only**: its tables and VS index live in the champion
+schema (`dais26_vfm_prod`), so run those with `-t prod`.
 
 ## Repo structure
 
@@ -130,12 +140,12 @@ dais26-mlops-for-dl-on-air/
 |       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
 |       |-- serve/          # detector_pyfunc.py, detector_model_script.py (models-from-code loader), embedder_pyfunc.py, postprocess.py, endpoint_manager.py
 |       `-- train/          # trainer.py (Trainer class), losses, train_detector (thin shim), cli (sgcli entry)
-|-- notebooks/              # 00_config / 00_setup .. 04b_create_vector_search .. 07_latency_benchmark, 08_backbone_comparison, 09_eval_comparison; widget-free, params via 00_config.py
+|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; widget-free, params via 00_config.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
 |-- sgcli/                  # Serverless GPU CLI workload (terminal launch path)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
 |-- tests/                  # unit/ and integration/ pytest suites
-`-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK
+`-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK, HPO
 ```
 
 ## Engineering anchors (Phase 4 hardening)
@@ -175,6 +185,7 @@ cached in a UC Volume by `scripts/pin_model_cache.py`.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @candidate→@champion, Mosaic AI comparison |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Pre-demo D-1 checklist, rollback procedure, DINOv2 fallback, service principal creation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Latency and accuracy numbers (populated Phase 4) |
+| [docs/HPO.md](docs/HPO.md) | Detector HPO log: the push-to-0.60 mAP campaign, architectural fixes, and best-run record |
 | [docs/TALK.md](docs/TALK.md) | 45-minute talk outline with timing marks and slide-to-demo mapping |
 
 ## Developer commands

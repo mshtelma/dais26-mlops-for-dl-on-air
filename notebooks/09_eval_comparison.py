@@ -2,8 +2,8 @@
 # MAGIC %md
 # MAGIC # 09 — Eval comparison (C-RADIOv4 vs DINOv3), apples-to-apples
 # MAGIC
-# MAGIC `08_backbone_comparison.py` ranks backbones by the `val/mAP_*` metrics the
-# MAGIC trainer logs. This notebook does the stronger thing: it **re-evaluates each
+# MAGIC Rather than ranking backbones by the `val/mAP_*` metrics the trainer logs,
+# MAGIC this notebook does the stronger thing: it **re-evaluates each
 # MAGIC registered detector from scratch on the same held-out split**, through the
 # MAGIC real serving pyfunc (`DetectorPyfunc`), and scores it with the same
 # MAGIC `eval.coco_metrics.evaluate_coco` the trainer uses. That makes the
