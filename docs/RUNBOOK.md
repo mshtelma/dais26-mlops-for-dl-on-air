@@ -150,15 +150,20 @@ versions), so there is no trigger loop.
    (`mAP_50`, `mAP_75`, `mAP_50_95`). If there is no `@champion` yet, the challenger
    auto-passes. (The DENTEX 250-image test set ships images only — no public annotations
    — so promotion is gated on the labeled 50-image val split, not test.)
-3. **Approval** (`notebooks/11`, CPU, `max_retries: 0`): passes only when the UC tag
-   `Approval_Check = Approved` is set on the version. To approve:
+3. **Approval_Check** (`notebooks/11`, CPU, no retries): passes only when the UC tag
+   `Approval_Check = Approved` is set on the version. The task name starts with
+   `approval`, so Databricks treats it as the deployment-job approval gate and shows an
+   **Approve** button on the model version page; clicking it auto-repairs the run and
+   writes the tag whose **key == the task name** (`Approval_Check`) with value
+   `Approved`. (Task name and the tag the notebook checks must stay in sync.) To approve,
+   click **Approve** on the model version page, or set the tag manually and repair-run:
    ```python
    from mlflow.tracking import MlflowClient
    c = MlflowClient(registry_uri="databricks-uc")
    c.set_model_version_tag(name=MODEL_NAME, version=MODEL_VERSION,
                            key="Approval_Check", value="Approved")
    ```
-   then repair-run the Approval task.
+   then repair-run the Approval_Check task.
 4. **RegisterChampion** (`notebooks/12`, CPU): `copy_model_version` from dev →
    `CHAMPION_CATALOG.CHAMPION_SCHEMA` (lineage to the source run preserved), then
    `set_registered_model_alias(..., "champion_candidate", <new prod version>)`. This task

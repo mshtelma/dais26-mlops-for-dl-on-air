@@ -17,7 +17,11 @@
 # MAGIC    model as a shallow copy whose version **points back to the source run**,
 # MAGIC    so lineage to the training experiment is preserved (MLflow >= 2.8,
 # MAGIC    UC -> UC same metastore). This version creation is what triggers
-# MAGIC    `deploy_champion_job`.
+# MAGIC    `deploy_champion_job`. If the source dev version predates MLflow 3
+# MAGIC    LoggedModels (empty `model_id`), `copy_model_version` can't copy it, so we
+# MAGIC    fall back to registering a new champion version from the source run's
+# MAGIC    artifact (`runs:/{run_id}/{artifact}`) — lineage is still preserved via the
+# MAGIC    run_id.
 # MAGIC 2. `set_registered_model_alias(CHAMPION_FULL, "champion_candidate", <new prod
 # MAGIC    version>)` — `deploy_champion_job` resolves this alias, deploys the candidate,
 # MAGIC    smoke-tests it, and flips `@champion` only on success, so the prior champion
@@ -36,6 +40,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 import mlflow
+from mlflow.exceptions import MlflowException
 from mlflow.tracking import MlflowClient
 
 from dais26_dentex.config.constants import ALIAS_CHAMPION_CANDIDATE
@@ -64,12 +69,38 @@ client = MlflowClient(registry_uri="databricks-uc")
 
 # COMMAND ----------
 # ---- 1. Lineage-preserving cross-schema copy (dev -> single prod/champion model) ----
-copied = client.copy_model_version(
-    src_model_uri=f"models:/{MODEL_NAME}/{MODEL_VERSION}",
-    dst_name=CHAMPION_FULL,
-)
-prod_version = str(copied.version)
-print(f"Copied to {CHAMPION_FULL} v{prod_version} (lineage to source run preserved).")
+# Prefer copy_model_version (UC -> UC, same metastore). MLflow 3's UC copy requires the
+# source version to carry a non-empty model_id (its LoggedModel link). Versions created
+# the classic way (mlflow.register_model from a run artifact) have model_id='' and fail
+# the copy with "model_id must be a non-empty string". Fall back to register_model from
+# the source run artifact, which creates a fresh champion version still tied to the
+# source run_id (lineage preserved) and is what triggers deploy_champion_job.
+try:
+    copied = client.copy_model_version(
+        src_model_uri=f"models:/{MODEL_NAME}/{MODEL_VERSION}",
+        dst_name=CHAMPION_FULL,
+    )
+    prod_version = str(copied.version)
+    print(f"Copied to {CHAMPION_FULL} v{prod_version} via copy_model_version (LoggedModel lineage).")
+except MlflowException as e:
+    if "model_id" not in str(e):
+        raise
+    src_mv = client.get_model_version(name=MODEL_NAME, version=MODEL_VERSION)
+    if not src_mv.run_id:
+        raise RuntimeError(
+            f"Cannot register champion: {MODEL_NAME} v{MODEL_VERSION} has neither a model_id "
+            f"(copy_model_version failed: {e}) nor a run_id to register from."
+        ) from e
+    # Artifact path is the leaf of the version's source (typically 'model').
+    artifact_path = (src_mv.source or "").rstrip("/").split("/")[-1] or "model"
+    run_uri = f"runs:/{src_mv.run_id}/{artifact_path}"
+    print(
+        f"copy_model_version unsupported for this source (no model_id); registering "
+        f"{run_uri} -> {CHAMPION_FULL} instead."
+    )
+    registered = mlflow.register_model(model_uri=run_uri, name=CHAMPION_FULL)
+    prod_version = str(registered.version)
+    print(f"Registered {CHAMPION_FULL} v{prod_version} from {run_uri} (lineage via run_id).")
 
 # Record the source dev model on the prod version so operators (and the downstream
 # embeddings/Vector-Search refresh) can tell which architecture this champion uses.

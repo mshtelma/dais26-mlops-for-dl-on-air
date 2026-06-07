@@ -73,22 +73,28 @@ resources:
           # No retries on any deployment-job task: fail fast so a bad challenger /
           # gate failure surfaces immediately (no silent re-run masking it).
 
-        - task_key: "Approval"
+        # Task name MUST start with "approval" (case-insensitive) for Databricks to
+        # treat it as the deployment-job approval gate and show the Approve button on
+        # the model version page. When a human clicks Approve, the framework writes a
+        # UC tag whose KEY == this task name (`Approval_Check`) and value `Approved`,
+        # then auto-repairs the run — so the task name and the tag the notebook checks
+        # (notebooks/11, APPROVAL_TAG="Approval_Check") MUST match exactly.
+        - task_key: "Approval_Check"
           depends_on:
             - task_key: "Evaluation"
           notebook_task:
             notebook_path: "../../notebooks/11_deploy_approval_task.py"
           environment_key: "default"
-          # Human-in-the-loop gate: fail fast and wait for a human to set
-          # Approval_Check=Approved + repair-run. Email when this task starts so a
-          # reviewer knows a challenger is waiting on approval.
+          # Human-in-the-loop gate: fail fast and wait for a human to click Approve
+          # (or set Approval_Check=Approved) + repair-run. Email when this task starts
+          # so a reviewer knows a challenger is waiting on approval.
           email_notifications:
             on_start:
               - "puneet.jain@databricks.com"
 
         - task_key: "RegisterChampion"
           depends_on:
-            - task_key: "Approval"
+            - task_key: "Approval_Check"
           notebook_task:
             notebook_path: "../../notebooks/12_promote_task.py"
           environment_key: "default"

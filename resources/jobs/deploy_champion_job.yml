@@ -12,8 +12,10 @@ resources:
       max_concurrent_runs: 1
 
       # Endpoint deploy/smoke + GPU embeddings precompute + Vector Search sync +
-      # drift. Sized for the serverless-GPU cold start on precompute_embeddings.
-      timeout_seconds: 7200
+      # drift. A cold GPU serving deploy of the multi-GB detector can take ~1h on
+      # its own (deploy_and_smoke_test waits it out, timeout 90m), then the GPU
+      # embeddings cold start + VS sync + drift follow — so allow 3h end-to-end.
+      timeout_seconds: 10800
 
       queue:
         enabled: true
@@ -88,4 +90,11 @@ resources:
             - task_key: "create_vector_search"
           notebook_task:
             notebook_path: "../../notebooks/05_drift_demo.py"
-          environment_key: "default"
+          # GPU: the drift baseline runs a frozen-backbone forward pass over the
+          # val images (load_backbone + compute_embeddings), same as
+          # precompute_embeddings. On the CPU "default" env this failed with
+          # "Found no NVIDIA driver". Use the serverless GPU env + A10 like the
+          # precompute task.
+          environment_key: "gpu"
+          compute:
+            hardware_accelerator: GPU_1xA10

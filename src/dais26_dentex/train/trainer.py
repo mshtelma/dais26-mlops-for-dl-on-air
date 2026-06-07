@@ -104,6 +104,11 @@ class Trainer:
         self._best_metric: float = -1.0
         self._best_state_dict: dict[str, torch.Tensor] | None = None
         self._best_epoch: int = -1
+        # Full val/* metric dict at the best epoch — logged against the
+        # LoggedModel (model_id) at save time so the metrics surface on the
+        # experiment Models tab and the sweep's best-in-experiment gate can
+        # read them off the LoggedModel rather than the run.
+        self._best_val_metrics: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Build helpers (called once from run())
@@ -513,7 +518,7 @@ class Trainer:
             from dais26_dentex.serve import detector_pyfunc as _dp
 
             model_script = str(Path(_dp.__file__).with_name("detector_model_script.py"))
-            reporter.log_pyfunc(
+            model_info = reporter.log_pyfunc(
                 python_model=model_script,
                 artifacts=artifacts,
                 signature=signature,
@@ -521,10 +526,46 @@ class Trainer:
                 registered_model_name=full_model if cfg.register_model else None,
             )
 
+        # MLflow 3: attach the best-epoch val metrics to the LoggedModel created
+        # by log_model so they show on the experiment's Models tab and the sweep
+        # gate can query them off the LoggedModel. Best-effort: a stubbed/older
+        # client (no model_id, or log_metrics without model_id=) is a no-op.
+        self._log_metrics_to_logged_model(model_info)
+
         if cfg.register_model and cfg.set_candidate_alias:
             assert self.run_id is not None, "set_candidate_alias requires an active MLflow run"
             version = reporter.set_candidate_alias(full_model=full_model, run_id=self.run_id)
             mlflow.log_param("registered_version", version)
+
+    def _log_metrics_to_logged_model(self, model_info: Any) -> None:
+        """Link the best-epoch val metrics to the LoggedModel (rank-0 only).
+
+        ``mlflow.pyfunc.log_model`` returns a ``ModelInfo`` carrying the MLflow 3
+        ``model_id`` of the LoggedModel it created. We re-log the best-epoch
+        ``val/*`` metrics — plus ``val/best_mAP_50`` (the sweep's primary metric,
+        ``SWEEP_PRIMARY_METRIC``) — against that ``model_id`` so they render on the
+        experiment's Models tab and the best-in-experiment gate in
+        ``02b_hpo_sweep.py`` can read them straight off the LoggedModel.
+
+        Best-effort by design: a stubbed client (model_info=None / no model_id) or
+        a pre-3.x ``log_metrics`` without a ``model_id`` kwarg is logged and
+        swallowed — the run-level metrics already cover the legacy read path.
+        """
+        model_id = getattr(model_info, "model_id", None)
+        if not model_id:
+            return
+        metrics = dict(self._best_val_metrics)
+        if self._best_metric >= 0.0:
+            metrics["val/best_mAP_50"] = self._best_metric
+        if not metrics:
+            return
+        try:
+            mlflow.log_metrics(metrics, model_id=model_id)
+            logger.info("Logged %d best-epoch metric(s) to LoggedModel %s", len(metrics), model_id)
+        except TypeError:
+            logger.info("mlflow.log_metrics has no model_id kwarg; metrics live on the run only.")
+        except Exception as e:  # noqa: BLE001 — lineage nicety, never fail a trained run
+            logger.warning("Could not log metrics to LoggedModel %s: %s", model_id, e)
 
     # ------------------------------------------------------------------
     # Driver
@@ -686,6 +727,7 @@ class Trainer:
                     if val_metrics and map50 > self._best_metric:
                         self._best_metric = map50
                         self._best_epoch = epoch
+                        self._best_val_metrics = dict(val_metrics)
                         self._best_state_dict = {
                             k: v.detach().cpu().clone() for k, v in unwrap_model(model).state_dict().items()
                         }

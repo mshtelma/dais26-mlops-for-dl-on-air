@@ -5,11 +5,20 @@
 # MAGIC Second task of `deploy_job_detector` (runs after Evaluation passes). This is
 # MAGIC the human-in-the-loop gate. It passes **only** when the UC model version
 # MAGIC carries the tag `Approval_Check = Approved`; otherwise it raises, failing the
-# MAGIC task. The job sets this task's `max_retries: 0`, so the first run fails fast
-# MAGIC and waits for a human (the service principal later) to set the tag and
-# MAGIC re-run / repair the task.
+# MAGIC task. The job runs this task with no retries, so the first run fails fast and
+# MAGIC waits for a human to approve and repair-run.
 # MAGIC
-# MAGIC To approve, set the tag on the evaluated version, e.g.:
+# MAGIC **The tag key is the approval task's name.** Databricks treats a task whose
+# MAGIC name starts with `approval` (case-insensitive) as the deployment-job approval
+# MAGIC gate and shows an **Approve** button on the model version page. Clicking it
+# MAGIC auto-repairs the run and writes a UC tag whose **key == the task name** with
+# MAGIC value `Approved`. Our task is named **`Approval_Check`**, so the UI writes
+# MAGIC `Approval_Check=Approved` — which is exactly what `APPROVAL_TAG` below checks.
+# MAGIC Keep the task name (resources/jobs/deploy_job_detector.yml) and `APPROVAL_TAG`
+# MAGIC in sync, or the UI Approve button will write a tag this gate never reads.
+# MAGIC
+# MAGIC To approve, click **Approve** on the model version page, or set the tag
+# MAGIC manually and repair-run this task:
 # MAGIC
 # MAGIC ```python
 # MAGIC from mlflow.tracking import MlflowClient
@@ -18,7 +27,7 @@
 # MAGIC                         key="Approval_Check", value="Approved")
 # MAGIC ```
 # MAGIC
-# MAGIC then repair-run this task. No GPU needed (serverless CPU).
+# MAGIC No GPU needed (serverless CPU).
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..

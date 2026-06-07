@@ -282,14 +282,37 @@ if _DO_RETRAIN:
         # version's (the experiment bar); otherwise restore @challenger to the prior
         # best version so a regression never becomes the challenger that triggers the
         # deployment job. Comparison is the pure `beats_experiment_best` (unit-tested).
+        def _logged_model_metric(model_id: str | None, key: str) -> float | None:
+            """Read `key` off a version's MLflow 3 LoggedModel (model_id), or None.
+
+            The Trainer links the best-epoch val metrics to the LoggedModel that
+            log_model creates (see Trainer._log_metrics_to_logged_model), so the
+            gate can compare versions straight off the Models tab — independent of
+            whether the source run is still queryable.
+            """
+            if not model_id:
+                return None
+            try:
+                lm = client.get_logged_model(model_id)
+            except Exception:
+                return None
+            for metric in getattr(lm, "metrics", None) or []:
+                if metric.key == key:
+                    return float(metric.value)
+            return None
+
         prior: list[tuple[str, float]] = []
         for mv in client.search_model_versions(f"name='{full_model}'"):
-            if str(mv.version) == str(winner_version) or not mv.run_id:
+            if str(mv.version) == str(winner_version):
                 continue
-            try:
-                m = client.get_run(mv.run_id).data.metrics.get(SWEEP_PRIMARY_METRIC)
-            except Exception:
-                m = None
+            # Prefer the LoggedModel metric (MLflow 3); fall back to the run metric
+            # for legacy versions whose LoggedModel has no linked metric.
+            m = _logged_model_metric(getattr(mv, "model_id", None), SWEEP_PRIMARY_METRIC)
+            if m is None and mv.run_id:
+                try:
+                    m = client.get_run(mv.run_id).data.metrics.get(SWEEP_PRIMARY_METRIC)
+                except Exception:
+                    m = None
             if m is not None:
                 prior.append((str(mv.version), float(m)))
 

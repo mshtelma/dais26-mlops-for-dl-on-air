@@ -226,6 +226,17 @@ is the single sweep driver (parametrized by `sweep_stage`); the former standalon
    Verify-only: resolves @challenger and raises if the gate left no alias. No deploy.
 ```
 
+**LoggedModel metric linkage (MLflow 3).** The `Trainer` re-logs the best-epoch
+`val/*` metrics (plus `val/best_mAP_50` = `SWEEP_PRIMARY_METRIC`) against the
+`model_id` of the LoggedModel that `log_model` creates
+(`Trainer._log_metrics_to_logged_model`), so they render on the experiment's
+**Models** tab and not just the parent run. The best-in-experiment gate in
+`02b_hpo_sweep.py` reads each prior version's metric off its LoggedModel
+(`client.get_logged_model(model_id)`) and falls back to the source run's metric
+only for legacy versions whose LoggedModel carries no linked metric. (The
+deployment job's eval task, `notebooks/10`, links its `val/*` metrics to the
+version's LoggedModel the same way.)
+
 What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
 
 | Knob | Why it's swept |
@@ -454,7 +465,9 @@ deploy_job_detector  (CHALLENGER side; max_concurrent_runs: 1, params model_name
   │     log val/* metrics to the model version (LoggedModel),
   │     gate: challenger beats the registered @champion on ≥ 2 of 3 metrics
   │           (mAP_50, mAP_75, mAP_50_95); auto-pass if there is no @champion yet
-  ├─ Approval (notebooks/11, CPU, max_retries: 0)
+  ├─ Approval_Check (notebooks/11, CPU, no retries)
+  │     task name starts with "approval" → UI shows an Approve button; clicking it
+  │     writes UC tag key==task name (Approval_Check)=Approved + auto-repairs the run.
   │     pass only if UC tag Approval_Check == Approved on the version
   └─ RegisterChampion (notebooks/12, CPU)
         copy_model_version dev → CHAMPION_FULL (lineage to source run preserved),

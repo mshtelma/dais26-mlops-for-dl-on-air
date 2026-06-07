@@ -51,18 +51,22 @@ from dais26_dentex.train.precompute_embeddings import precompute_embeddings
 
 n = precompute_embeddings(
     spark=spark,
-    catalog=CATALOG,
-    schema=SCHEMA,
+    # Write to the CHAMPION catalog/schema, NOT the dev CATALOG/SCHEMA. This
+    # notebook only runs as the champion deploy job's refresh step, and the
+    # downstream consumers (04b create_vector_search, 05 drift_demo) all read
+    # `TRAIN_EMBEDDINGS_TABLE` == `CHAMPION_CATALOG.CHAMPION_SCHEMA.<prefix>train_embeddings`.
+    # Writing to the dev schema here made precompute "succeed" while
+    # create_vector_search then failed with TABLE_OR_VIEW_NOT_FOUND on the prod
+    # table. (Source images are still read from the dev VOLUME_PATH below.)
+    catalog=CHAMPION_CATALOG,
+    schema=CHAMPION_SCHEMA,
     volume_path=VOLUME_PATH,
     backbone_name=EFFECTIVE_BACKBONE,  # type: ignore[arg-type]
     backbone_revision=BACKBONE_REVISION,
     cache_dir=CACHE_DIR,
     batch_size=EMBEDDINGS_BATCH_SIZE,
-    # Write to the TABLE_PREFIX-aware table (== TRAIN_EMBEDDINGS_TABLE) so the
-    # VS index / drift / similarity-search notebooks (which all reference
-    # TRAIN_EMBEDDINGS_TABLE) find the embeddings. Without this the function's
-    # default table_name="train_embeddings" drops the prefix and writes to the
-    # wrong table.
+    # table_name matches TRAIN_EMBEDDINGS_TABLE's prefix-aware name so the
+    # VS index / drift / similarity-search notebooks find the embeddings.
     table_name=f"{TABLE_PREFIX}train_embeddings",
     vector_search_endpoint=EMBEDDINGS_VS_ENDPOINT,
     vector_search_index=EMBEDDINGS_VS_INDEX,

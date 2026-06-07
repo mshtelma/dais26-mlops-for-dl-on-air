@@ -28,7 +28,25 @@
 # MAGIC No GPU on the driver (the endpoint uses GPU serving compute); serverless CPU.
 
 # COMMAND ----------
-# MAGIC %pip install --quiet ..
+# MAGIC %md
+# MAGIC ### Deploy-only install (do NOT pull the full training/serving runtime)
+# MAGIC
+# MAGIC This task only resolves a UC alias, updates the serving endpoint via the
+# MAGIC Databricks SDK, and smoke-tests it. It does **not** import torch /
+# MAGIC transformers / timm / open_clip / umap-learn / pycocotools. Installing the
+# MAGIC full `[project]` dependency tree on a cold serverless env was hanging for
+# MAGIC 40+ min in the pip build (llvmlite / pycocotools compiled from source) and
+# MAGIC the task never reached the endpoint update. So we install only the few
+# MAGIC lightweight libs the deploy code path imports, then install the
+# MAGIC `dais26_dentex` package itself with `--no-deps` (its import chain —
+# MAGIC `serve.endpoint_manager` + `config.constants`/`trainer_config` — needs only
+# MAGIC `yaml` at import time).
+
+# COMMAND ----------
+# MAGIC %pip install --quiet "mlflow>=3.1" "databricks-sdk>=0.38.0" "PyYAML>=6.0" "Pillow>=10.4.0,<12.0"
+
+# COMMAND ----------
+# MAGIC %pip install --quiet --no-deps ..
 
 # COMMAND ----------
 dbutils.library.restartPython()
@@ -64,6 +82,7 @@ result = deploy_and_smoke_test(
     workload_size=DEPLOY_WORKLOAD_SIZE,
     workload_type=DEPLOY_WORKLOAD_TYPE,
     scale_to_zero=DEPLOY_SCALE_TO_ZERO,
+    timeout_seconds=DEPLOY_TIMEOUT_SECONDS,
     promote_on_success=True,
 )
 print(result)

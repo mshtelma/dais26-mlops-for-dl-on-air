@@ -579,6 +579,10 @@ DEPLOY_ACTION = "deploy_and_smoke_test"
 DEPLOY_WORKLOAD_TYPE = "GPU_SMALL"  # GPU_SMALL | GPU_MEDIUM | GPU_LARGE
 DEPLOY_WORKLOAD_SIZE = "Small"      # Small | Medium | Large
 DEPLOY_SCALE_TO_ZERO = True
+# A cold GPU serving deploy of the multi-GB detector can take ~1h; wait it out
+# (and wait out any in-flight update on a re-run) rather than timing out and
+# colliding with the still-rolling update. Keep below the job timeout_seconds.
+DEPLOY_TIMEOUT_SECONDS = 5400  # 90 min
 
 # 05_drift_demo
 DRIFT_MODE = "demo"                 # "demo" or "scheduled"
