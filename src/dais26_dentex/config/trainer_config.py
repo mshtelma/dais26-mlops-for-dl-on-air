@@ -47,6 +47,31 @@ ALLOWED_BACKBONES: tuple[str, ...] = (
     "dinov2_base",
 )
 
+# How much of the backbone is trainable:
+#   frozen  — backbone weights fixed (the historical default; head/FPN only).
+#   lora    — inject LoRA adapters into attention (cfg.lora_rank/alpha).
+#   full    — fine-tune the entire backbone end-to-end.
+#   partial — unfreeze only the last `backbone_trainable_blocks` transformer blocks.
+ALLOWED_BACKBONE_MODES: tuple[str, ...] = ("frozen", "lora", "full", "partial")
+
+# Anchor generation layout (mirrors detection_head.ANCHOR_LAYOUTS; duplicated here
+# so config validation doesn't import the heavy models package):
+#   absolute  — same scale list at every FPN level (legacy; over-generates).
+#   per_level — base size = stride * base_scale, x octaves x ratios (RetinaNet).
+ALLOWED_ANCHOR_LAYOUTS: tuple[str, ...] = ("absolute", "per_level")
+
+# Autocast precision for CUDA training:
+#   auto — bf16 for DINOv3 (NaNs under fp16), fp16 for everything else.
+#   fp16 — half precision + GradScaler (C-RADIO's proven, stable path).
+#   bf16 — bfloat16 autocast, no GradScaler (wide dynamic range; DINOv3-safe).
+#   fp32 — autocast disabled (slowest, most accurate; bf16 fallback for DINOv3).
+ALLOWED_AMP_DTYPES: tuple[str, ...] = ("auto", "fp16", "bf16", "fp32")
+
+# Box-regression loss:
+#   smooth_l1 — Huber on encoded (dx,dy,dw,dh) deltas (legacy RetinaNet default).
+#   giou      — 1 - GIoU on *decoded* boxes (scale-invariant; better localization).
+ALLOWED_BOX_LOSS_TYPES: tuple[str, ...] = ("smooth_l1", "giou")
+
 
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
@@ -64,6 +89,14 @@ class TrainerConfig:
     backbone_name: str = "cradio_v4_so400m"
     backbone_revision: str | None = None
     cache_dir: str | None = None
+    # Multi-layer ViT feature fusion: hidden-state layer indices to fuse into the
+    # single spatial map the FPN consumes. `None` (default) = legacy last-layer-
+    # only behavior. e.g. [6, 12, 18, 24] fuses 4 depths via a learnable softmax
+    # weighted sum (ViT-Det style), which usually beats last-layer-only for
+    # detection on ViT backbones. Requires an HF backbone exposing
+    # `output_hidden_states` (dinov3_vitl16 / dinov2_base); see
+    # `models.backbones` and docs/HPO.md "Multi-layer fusion".
+    fusion_layers: list[int] | None = None
 
     # --- Data ------------------------------------------------------------
     volume_path: str | None = None
@@ -77,15 +110,107 @@ class TrainerConfig:
     onecycle_pct_start: float = 0.1
     batch_size: int = 8
     num_workers: int = 4
+    # Gradient accumulation: accumulate grads over this many micro-batches before
+    # one optimizer step, so high-resolution fp32 runs (e.g. DINOv3 @ 1280px) can
+    # keep a large *effective* batch while fitting a tiny per-GPU `batch_size` in
+    # memory. The OneCycle scheduler steps once per optimizer step, so the
+    # effective batch is `batch_size * grad_accum_steps * world_size`. `1` (the
+    # default) is the legacy no-accumulation path.
+    grad_accum_steps: int = 1
+
+    # --- Augmentation ----------------------------------------------------
+    # Training-time augmentation strength. Defaults reproduce the legacy pipeline
+    # (hflip p=0.5 + mild colour-jitter p=0.5, no rotation, no multi-scale) so
+    # existing runs are byte-identical; the tuning campaigns dial these up to
+    # regularize the 705-image train set (see docs/HPO.md). Val/inference never
+    # augment regardless of these values.
+    aug_hflip_prob: float = 0.5
+    aug_jitter_prob: float = 0.5
+    # Multiplier on the base colour-jitter magnitudes (brightness/contrast/
+    # saturation 0.2, hue 0.05). 1.0 = legacy; >1 = stronger photometric jitter.
+    aug_jitter_scale: float = 1.0
+    # Max absolute rotation in degrees (random in [-deg, +deg], applied to image
+    # and boxes via tv_tensors). 0.0 = disabled (legacy). Dental X-rays are
+    # roughly axis-aligned, so keep this small (<=10).
+    aug_rotation_deg: float = 0.0
+    # Multi-scale training: per-sample, the longest-side resize target is scaled
+    # by a random factor in this [lo, hi] range (then zero-padded back to
+    # `img_size` so tensors stay uniform for batching). `None` = disabled
+    # (legacy). Both bounds must be in (0, 1] — we only down-scale to avoid
+    # cropping content out of the fixed `img_size` canvas.
+    aug_multiscale_range: list[float] | None = None
+    # Class-balanced oversampling: replicate training images that contain at least
+    # one box of the hard class (Caries, label id 0) by this integer-ish factor
+    # via a WeightedRandomSampler. 1.0 (default) = legacy uniform sampling. e.g.
+    # 2.0 makes Caries-bearing images ~2x as likely per epoch, directly targeting
+    # the binding Caries AP@50 gate. Applied train-only; val is untouched.
+    caries_oversample: float = 1.0
+
+    # --- Mixed precision -------------------------------------------------
+    # Autocast dtype for CUDA training. "auto" resolves to bf16 for DINOv3
+    # (which NaNs under fp16 — see docs/HPO.md "DINOv3 A/B") and fp16 otherwise
+    # (C-RADIO trains stably in fp16). The GradScaler is only engaged for fp16;
+    # bf16/fp32 need no loss scaling. See `effective_amp_dtype`.
+    amp_dtype: str = "auto"
+    # Fail-fast guard: abort training if `train/loss` has not decreased at all
+    # after this many epochs (0 = disabled). Catches dead runs (e.g. AMP
+    # instability skipping every optimizer step) before they burn the full
+    # schedule.
+    flat_loss_patience: int = 0
 
     # --- Loss weights ----------------------------------------------------
     focal_alpha: float = 0.25
     focal_gamma: float = 2.0
     box_loss_weight: float = 1.0
+    # Box-regression loss function. "smooth_l1" (default) is the legacy delta
+    # Huber loss; "giou" computes 1 - generalized-IoU on decoded boxes, which is
+    # scale-invariant and usually improves localization (mAP@50:95) and small-box
+    # recall. See `train.losses.giou_box_loss`.
+    box_loss_type: str = "smooth_l1"
 
     # --- Detection -------------------------------------------------------
     # `num_classes=None` defers to `len(get_label_map())` at trainer build time.
     num_classes: int | None = None
+    # Anchor geometry. `None` defers to `detection_head.DEFAULT_ANCHOR_SCALES` /
+    # `DEFAULT_ASPECT_RATIOS` so existing runs are unchanged; set explicitly
+    # (e.g. from `calibrate_anchors`) to retarget anchors to the DENTEX box
+    # distribution. The values used are recorded in the manifest so serve/eval
+    # reconstruct the identical anchor set.
+    anchor_scales: list[int] | None = None
+    aspect_ratios: list[float] | None = None
+    # Anchor layout. `absolute` (default) keeps the legacy behavior so existing
+    # runs are byte-identical. `per_level` switches to stride-scaled RetinaNet
+    # anchors: each level's base size is `stride * anchor_base_scale`, multiplied
+    # by `anchor_octaves` and `aspect_ratios`. `anchor_scales` is ignored in
+    # per_level mode. `anchor_octaves=None` defers to the module default
+    # ({2^0, 2^(1/3), 2^(2/3)}). All three are recorded in the manifest so
+    # serve/eval rebuild the identical anchor set.
+    anchor_layout: str = "absolute"
+    anchor_base_scale: float = 4.0
+    anchor_octaves: list[float] | None = None
+    # Run NMS per predicted class (torchvision.batched_nms) instead of one
+    # class-agnostic pass, so a lesion box inside its tooth box is not
+    # suppressed by a higher-scoring cross-class detection.
+    nms_per_class: bool = False
+    # Decode/NMS thresholds applied at eval + serve time. These were previously
+    # hardcoded as `DetectionModel` defaults; surfacing them lets the campaign
+    # grid them post-hoc on a trained checkpoint (a free, no-retrain lever) and
+    # records the chosen values in the manifest so serve/eval reproduce them.
+    score_threshold: float = 0.05
+    nms_iou_threshold: float = 0.5
+    max_detections: int = 100
+
+    # --- Backbone adaptation --------------------------------------------
+    # `backbone_mode` is the modern knob (frozen|lora|full|partial). `use_lora`
+    # is retained for back-compat: when it's True and `backbone_mode` is left at
+    # the "frozen" default, the effective mode resolves to "lora"
+    # (see `effective_backbone_mode`).
+    backbone_mode: str = "frozen"
+    # Discriminative LR for the (un)frozen backbone params. Much smaller than the
+    # head LR (`lr`) to avoid catastrophic forgetting during fine-tuning.
+    backbone_lr: float = 1e-5
+    # For `partial` mode: number of trailing transformer blocks to unfreeze.
+    backbone_trainable_blocks: int = 0
 
     # --- PEFT ------------------------------------------------------------
     use_lora: bool = False
@@ -127,10 +252,14 @@ class TrainerConfig:
             "epochs",
             "batch_size",
             "num_workers",
+            "grad_accum_steps",
             "lora_rank",
             "img_size",
             "num_classes",
+            "max_detections",
             "base_seed",
+            "backbone_trainable_blocks",
+            "flat_loss_patience",
         }
     )
     _FLOAT_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -144,6 +273,15 @@ class TrainerConfig:
             "box_loss_weight",
             "lora_alpha",
             "barrier_timeout_seconds",
+            "backbone_lr",
+            "anchor_base_scale",
+            "score_threshold",
+            "nms_iou_threshold",
+            "aug_hflip_prob",
+            "aug_jitter_prob",
+            "aug_jitter_scale",
+            "aug_rotation_deg",
+            "caries_oversample",
         }
     )
     _BOOL_FIELDS: ClassVar[frozenset[str]] = frozenset(
@@ -152,6 +290,7 @@ class TrainerConfig:
             "register_model",
             "set_candidate_alias",
             "ddp_find_unused",
+            "nms_per_class",
         }
     )
 
@@ -182,6 +321,10 @@ class TrainerConfig:
                 cleaned[k] = float(v)
             elif k in cls._BOOL_FIELDS:
                 cleaned[k] = _coerce_bool(v)
+            elif k in ("anchor_scales", "fusion_layers"):
+                cleaned[k] = [int(x) for x in v]
+            elif k in ("aspect_ratios", "anchor_octaves", "aug_multiscale_range"):
+                cleaned[k] = [float(x) for x in v]
             else:
                 cleaned[k] = v
         # Backbone alias resolution.
@@ -292,10 +435,73 @@ class TrainerConfig:
             errs.append(f"lora_rank must be >= 1 when use_lora=True, got {self.lora_rank}")
         if self.use_lora and self.lora_alpha <= 0:
             errs.append(f"lora_alpha must be > 0 when use_lora=True, got {self.lora_alpha}")
+        if self.backbone_mode not in ALLOWED_BACKBONE_MODES:
+            errs.append(f"backbone_mode {self.backbone_mode!r} not in {ALLOWED_BACKBONE_MODES}")
+        if self.backbone_lr <= 0:
+            errs.append(f"backbone_lr must be > 0, got {self.backbone_lr}")
+        if self.backbone_trainable_blocks < 0:
+            errs.append(f"backbone_trainable_blocks must be >= 0, got {self.backbone_trainable_blocks}")
+        if self.backbone_mode == "partial" and self.backbone_trainable_blocks < 1:
+            errs.append("backbone_mode='partial' requires backbone_trainable_blocks >= 1")
+        if self.anchor_scales is not None and (
+            len(self.anchor_scales) == 0 or any(s <= 0 for s in self.anchor_scales)
+        ):
+            errs.append(f"anchor_scales must be a non-empty list of positive ints, got {self.anchor_scales}")
+        if self.aspect_ratios is not None and (
+            len(self.aspect_ratios) == 0 or any(r <= 0 for r in self.aspect_ratios)
+        ):
+            errs.append(f"aspect_ratios must be a non-empty list of positive floats, got {self.aspect_ratios}")
+        if self.anchor_layout not in ALLOWED_ANCHOR_LAYOUTS:
+            errs.append(f"anchor_layout {self.anchor_layout!r} not in {ALLOWED_ANCHOR_LAYOUTS}")
+        if self.anchor_base_scale <= 0:
+            errs.append(f"anchor_base_scale must be > 0, got {self.anchor_base_scale}")
+        if self.anchor_octaves is not None and (
+            len(self.anchor_octaves) == 0 or any(o <= 0 for o in self.anchor_octaves)
+        ):
+            errs.append(f"anchor_octaves must be a non-empty list of positive floats, got {self.anchor_octaves}")
         if self.num_classes is not None and self.num_classes < 1:
             errs.append(f"num_classes must be >= 1 (or None to derive), got {self.num_classes}")
         if self.barrier_timeout_seconds <= 0:
             errs.append(f"barrier_timeout_seconds must be > 0, got {self.barrier_timeout_seconds}")
+        if self.amp_dtype not in ALLOWED_AMP_DTYPES:
+            errs.append(f"amp_dtype {self.amp_dtype!r} not in {ALLOWED_AMP_DTYPES}")
+        if self.flat_loss_patience < 0:
+            errs.append(f"flat_loss_patience must be >= 0, got {self.flat_loss_patience}")
+        if self.grad_accum_steps < 1:
+            errs.append(f"grad_accum_steps must be >= 1, got {self.grad_accum_steps}")
+        if not (0.0 <= self.score_threshold < 1.0):
+            errs.append(f"score_threshold must be in [0, 1), got {self.score_threshold}")
+        if not (0.0 < self.nms_iou_threshold <= 1.0):
+            errs.append(f"nms_iou_threshold must be in (0, 1], got {self.nms_iou_threshold}")
+        if self.max_detections < 1:
+            errs.append(f"max_detections must be >= 1, got {self.max_detections}")
+        if not (0.0 <= self.aug_hflip_prob <= 1.0):
+            errs.append(f"aug_hflip_prob must be in [0, 1], got {self.aug_hflip_prob}")
+        if not (0.0 <= self.aug_jitter_prob <= 1.0):
+            errs.append(f"aug_jitter_prob must be in [0, 1], got {self.aug_jitter_prob}")
+        if self.aug_jitter_scale < 0:
+            errs.append(f"aug_jitter_scale must be >= 0, got {self.aug_jitter_scale}")
+        if self.aug_rotation_deg < 0:
+            errs.append(f"aug_rotation_deg must be >= 0, got {self.aug_rotation_deg}")
+        if self.aug_multiscale_range is not None:
+            r = self.aug_multiscale_range
+            if len(r) != 2 or not (0.0 < r[0] <= r[1] <= 1.0):
+                errs.append(
+                    "aug_multiscale_range must be [lo, hi] with 0 < lo <= hi <= 1, "
+                    f"got {self.aug_multiscale_range}"
+                )
+        if self.box_loss_type not in ALLOWED_BOX_LOSS_TYPES:
+            errs.append(f"box_loss_type {self.box_loss_type!r} not in {ALLOWED_BOX_LOSS_TYPES}")
+        if self.caries_oversample < 1.0:
+            errs.append(f"caries_oversample must be >= 1.0, got {self.caries_oversample}")
+        if self.fusion_layers is not None:
+            if len(self.fusion_layers) == 0:
+                errs.append("fusion_layers must be a non-empty list of ints (or None)")
+            if self.backbone_name != "dinov3_vitl16":
+                errs.append(
+                    "fusion_layers is currently only supported for dinov3_vitl16 "
+                    f"(HF output_hidden_states), not {self.backbone_name!r}"
+                )
         if errs:
             raise ValueError("TrainerConfig validation failed:\n  - " + "\n  - ".join(errs))
 
@@ -307,6 +513,35 @@ class TrainerConfig:
         """
         return dataclasses.replace(self, **overrides)
 
+    def effective_backbone_mode(self) -> str:
+        """Resolve the backbone-adaptation mode, honoring the legacy `use_lora`.
+
+        `backbone_mode` is authoritative. The legacy `use_lora=True` flag maps
+        onto `"lora"` only when `backbone_mode` is still at its `"frozen"`
+        default, so old callers that set `use_lora=True` keep working while a
+        caller that explicitly sets `backbone_mode` wins.
+        """
+        if self.backbone_mode == "frozen" and self.use_lora:
+            return "lora"
+        return self.backbone_mode
+
+    def effective_amp_dtype(self) -> str:
+        """Resolve the autocast precision, honoring the "auto" backbone policy.
+
+        "auto" maps DINOv3 to fp32 and everything else to fp16 (C-RADIO's stable,
+        proven path). DINOv3 is autocast-unstable here: fp16 NaNs the
+        RoPE/LayerScale encoder (GradScaler then skips every step → dead-flat
+        loss), and an empirical smoke (docs/HPO.md "DINOv3 A/B") showed **bf16
+        also NaNs the forward at step 0** for this detector stack — only fp32
+        (autocast disabled) trains (loss 1.39→0.77, val mAP@50 0→0.22 in 3 ep).
+        An explicit `amp_dtype` always wins, so bf16 stays available to retest.
+        """
+        if self.amp_dtype != "auto":
+            return self.amp_dtype
+        if self.backbone_name == "dinov3_vitl16":
+            return "fp32"
+        return "fp16"
+
 
 # Module-level so it's testable. Accepts the YAML scalar shapes plus
 # common stringly-typed inputs ("True"/"true"/"1"/"yes"). Anything else is
@@ -314,7 +549,7 @@ class TrainerConfig:
 def _coerce_bool(v: Any) -> bool:
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)):
+    if isinstance(v, int | float):
         return bool(v)
     if isinstance(v, str):
         s = v.strip().lower()
@@ -328,6 +563,7 @@ def _coerce_bool(v: Any) -> bool:
 # Re-export `field` so callers building configs programmatically don't have
 # to also import `dataclasses`.
 __all__ = [
+    "ALLOWED_AMP_DTYPES",
     "ALLOWED_BACKBONES",
     "BACKBONE_ALIASES",
     "TrainerConfig",

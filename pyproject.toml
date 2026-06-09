@@ -20,9 +20,8 @@ dependencies = [
     "timm>=1.0.0,<2.0",
     "einops>=0.8.0,<1.0",
     "open_clip_torch>=2.30.0,<3.0",
-    "mlflow>=2.18.0,<3.0",
+    "mlflow>=3.1",
     "databricks-sdk>=0.38.0,<1.0",
-    "databricks-vectorsearch>=0.40,<1.0",
     "peft>=0.14.0,<1.0",
     "pycocotools>=2.0.8",
     "scikit-learn>=1.5.0,<2.0",
@@ -33,7 +32,6 @@ dependencies = [
     "huggingface-hub>=0.26.0,<1.0",
     "plotly>=5.24.0,<7.0",
     "umap-learn>=0.5.6,<1.0",
-    "tqdm>=4.66.0,<5.0",
     "PyYAML>=6.0,<7.0",
 ]
 
@@ -94,15 +92,35 @@ markers = [
 # Keep these aligned with the [project] dependencies table above; the
 # pyfunc only needs the deps used at predict-time.
 [tool.dais26.serving-deps]
+# torch/torchvision are PINNED to a CUDA 12.4 (cu124) build. GPU_SMALL (T4)
+# serving nodes ship an NVIDIA driver that reports CUDA 12.4; an unpinned
+# `torch` resolves to the newest wheel (cu126/cu128) whose runtime the older
+# driver cannot initialize -> `torch.cuda.is_available()` returns False and
+# the model silently falls back to CPU (0% GPU util, slow inference).
+# torch 2.6.0 / torchvision 0.21.0 default to cu124 on PyPI and load on driver 12.4.
+# Pins MUST match the validated training env (the model was trained/logged with
+# these bounds). Leaving them OPEN is what broke the champion endpoint: the image
+# built fine ("Container image creation finished successfully") but the model
+# server then died with "Exit code 1" at load_context ->
+#   AutoModel.from_pretrained("facebook/dinov3-vitl16-pretrain-lvd1689m")
+#   ModuleNotFoundError: Could not import module 'DINOv3ViTModel'.
+# i.e. unpinned `transformers` resolved to a version (>=5.0) that cannot import
+# the DINOv3 ViT modeling class, while training used a working 4.x. We pin
+# transformers to an EXACT version to remove any float risk on future serving
+# image builds: 4.56.2 is the patch release of the first minor (4.56.0, 2025-08-29)
+# that ships native DINOv3 support (`DINOv3ViTModel` / model_type `dinov3_vit`) and
+# is compatible with the pinned torch==2.6.0. numpy<2 and huggingface-hub<1 likewise
+# avoid the NumPy-2 C-extension ABI break and the hf-hub 1.x offline-resolver break.
 detector = [
-    "torch",
-    "torchvision",
-    "transformers",
-    "mlflow",
-    "Pillow",
-    "numpy",
-    "pandas",
-    "timm",
-    "einops",
-    "open_clip_torch",
+    "torch==2.6.0",
+    "torchvision==0.21.0",
+    "transformers==4.56.2",
+    "mlflow>=3.1",
+    "Pillow>=10.4.0,<12.0",
+    "numpy>=1.26.0,<2.0",
+    "pandas>=2.2.0,<3.0",
+    "timm>=1.0.0,<2.0",
+    "einops>=0.8.0,<1.0",
+    "open_clip_torch>=2.30.0,<3.0",
+    "huggingface-hub>=0.26.0,<1.0",
 ]

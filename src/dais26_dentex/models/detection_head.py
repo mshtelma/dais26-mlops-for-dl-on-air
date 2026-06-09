@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 from typing import ClassVar
@@ -12,6 +13,21 @@ import torch.nn.functional as functional
 DEFAULT_ANCHOR_SCALES: list[int] = [16, 32, 64, 128]
 DEFAULT_ASPECT_RATIOS: list[float] = [0.5, 1.0, 2.0]
 DEFAULT_NUM_CLASSES: int = 4
+
+# Per-level anchor layout defaults (standard RetinaNet octave scales). In
+# `per_level` mode each FPN level's base anchor size is `stride * base_scale`,
+# then multiplied by these octaves and the aspect ratios → 3*3=9 anchors/cell,
+# uniform across levels but correctly sized per stride. See
+# `arch_probe.KNOWN_ISSUES` (the MAJOR anchor-over-generation finding).
+DEFAULT_ANCHOR_OCTAVES: list[float] = [2.0**0, 2.0 ** (1.0 / 3.0), 2.0 ** (2.0 / 3.0)]
+DEFAULT_ANCHOR_BASE_SCALE: float = 4.0
+ANCHOR_LAYOUTS: tuple[str, ...] = ("absolute", "per_level")
+
+# Shared bound for the box-regression log-space width/height delta. `decode_boxes`
+# clamps `exp(dw/dh)` at this value; `targets.encode_boxes_xyxy_to_deltas` clamps
+# the encoded target to match so a large-gt/small-anchor pair stays reachable
+# (encode/decode symmetry — see the MINOR clamp issue in arch_probe).
+BOX_DELTA_LOG_CLAMP: float = 4.0
 
 
 def _init_classification_bias(num_anchors: int, num_classes: int, prior: float = 0.01) -> torch.Tensor:
@@ -90,10 +106,19 @@ class RetinaNetHead(nn.Module):
 
 
 class AnchorGenerator(nn.Module):
-    """Generates anchor boxes per FPN level given scales + aspect ratios.
+    """Generates anchor boxes per FPN level.
 
-    Each FPN level has a stride: p3=8, p4=16, p5=32, p6=64.
-    For each grid cell, generate len(scales) * len(aspect_ratios) anchors centered on the cell.
+    Each FPN level has a stride: p3=8, p4=16, p5=32, p6=64. For each grid cell,
+    `num_anchors_per_cell` anchors are centered on the cell. Two layouts:
+
+    - ``absolute`` (legacy): the same ``scales x aspect_ratios`` sizes are placed
+      at *every* level. This over-generates geometrically useless anchors (a
+      128px anchor on stride-8 p3, a 16px anchor on stride-64 p6) and was the
+      prime suspect for the mAP plateau (see ``arch_probe.KNOWN_ISSUES``).
+    - ``per_level`` (standard RetinaNet): each level's base size is
+      ``stride * base_scale``, multiplied by ``octaves`` and ``aspect_ratios``.
+      The per-cell count stays uniform (so the shared head is valid) but the
+      absolute sizes scale with the level — p3 gets small anchors, p6 large.
     """
 
     LEVEL_STRIDES: ClassVar[dict[str, int]] = {"p3": 8, "p4": 16, "p5": 32, "p6": 64}
@@ -102,10 +127,33 @@ class AnchorGenerator(nn.Module):
         self,
         scales: list[int] | None = None,
         aspect_ratios: list[float] | None = None,
+        *,
+        layout: str = "absolute",
+        base_scale: float = DEFAULT_ANCHOR_BASE_SCALE,
+        octaves: list[float] | None = None,
     ) -> None:
         super().__init__()
+        if layout not in ANCHOR_LAYOUTS:
+            raise ValueError(f"anchor layout {layout!r} not in {ANCHOR_LAYOUTS}")
+        self.layout = layout
         self.scales = scales if scales is not None else DEFAULT_ANCHOR_SCALES
         self.aspect_ratios = aspect_ratios if aspect_ratios is not None else DEFAULT_ASPECT_RATIOS
+        self.base_scale = float(base_scale)
+        self.octaves = list(octaves) if octaves is not None else list(DEFAULT_ANCHOR_OCTAVES)
+
+    @property
+    def num_anchors_per_cell(self) -> int:
+        """Anchors generated per grid cell — uniform across levels in both layouts."""
+        if self.layout == "per_level":
+            return len(self.octaves) * len(self.aspect_ratios)
+        return len(self.scales) * len(self.aspect_ratios)
+
+    def _sizes_for_stride(self, stride: int) -> list[float]:
+        """Base anchor sizes (pre aspect-ratio) for one level's stride."""
+        if self.layout == "per_level":
+            base = stride * self.base_scale
+            return [base * o for o in self.octaves]
+        return [float(s) for s in self.scales]
 
     def _anchors_for_level(self, stride: int, grid_h: int, grid_w: int, device: torch.device) -> torch.Tensor:
         """Generate (grid_h * grid_w * A, 4) anchors in xyxy pixel coords."""
@@ -115,7 +163,7 @@ class AnchorGenerator(nn.Module):
         centers = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)  # (H*W, 2)
 
         anchor_sizes: list[tuple[float, float]] = []
-        for s in self.scales:
+        for s in self._sizes_for_stride(stride):
             for r in self.aspect_ratios:
                 w = float(s) * math.sqrt(r)
                 h = float(s) / math.sqrt(r)
@@ -181,8 +229,8 @@ def decode_boxes(box_pred: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
     dx, dy, dw, dh = box_pred.unbind(-1)
     cx = a_cx + dx * a_w
     cy = a_cy + dy * a_h
-    w = a_w * torch.exp(dw.clamp(max=4.0))
-    h = a_h * torch.exp(dh.clamp(max=4.0))
+    w = a_w * torch.exp(dw.clamp(max=BOX_DELTA_LOG_CLAMP))
+    h = a_h * torch.exp(dh.clamp(max=BOX_DELTA_LOG_CLAMP))
     return torch.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], dim=-1)
 
 
@@ -204,6 +252,11 @@ class DetectionModel(nn.Module):
         nms_iou_threshold: float = 0.5,
         score_threshold: float = 0.05,
         max_detections: int = 100,
+        *,
+        anchor_layout: str = "absolute",
+        anchor_base_scale: float = DEFAULT_ANCHOR_BASE_SCALE,
+        anchor_octaves: list[float] | None = None,
+        nms_per_class: bool = False,
     ) -> None:
         super().__init__()
         from dais26_dentex.models.adapters import FPNAdapter
@@ -212,13 +265,33 @@ class DetectionModel(nn.Module):
         self.fpn = FPNAdapter(in_channels=spatial_dim, out_channels=256)
         scales_eff = scales if scales is not None else DEFAULT_ANCHOR_SCALES
         ratios_eff = aspect_ratios if aspect_ratios is not None else DEFAULT_ASPECT_RATIOS
-        num_anchors = len(scales_eff) * len(ratios_eff)
+        # Build the anchor generator first so the head's per-cell anchor count is
+        # derived from the chosen layout (per_level → octaves x ratios, absolute
+        # → scales x ratios) instead of assuming the absolute formula.
+        self.anchor_gen = AnchorGenerator(
+            scales=scales_eff,
+            aspect_ratios=ratios_eff,
+            layout=anchor_layout,
+            base_scale=anchor_base_scale,
+            octaves=anchor_octaves,
+        )
+        num_anchors = self.anchor_gen.num_anchors_per_cell
         self.head = RetinaNetHead(in_channels=256, num_classes=num_classes, num_anchors=num_anchors)
-        self.anchor_gen = AnchorGenerator(scales=scales_eff, aspect_ratios=ratios_eff)
         self.patch_size = patch_size
         self.nms_iou_threshold = nms_iou_threshold
         self.score_threshold = score_threshold
         self.max_detections = max_detections
+        # When True, NMS is run per predicted class (torchvision.batched_nms) so a
+        # lesion box co-located inside its tooth box is not suppressed by a
+        # higher-scoring cross-class detection. See the MEDIUM NMS issue.
+        self.nms_per_class = nms_per_class
+        # Whether the backbone participates in autograd. The builder sets the
+        # backbone's requires_grad (frozen / lora / partial / full) BEFORE
+        # constructing this model, so we can snapshot it once here. When the
+        # backbone is trainable, `forward_train` must NOT wrap it in
+        # torch.no_grad() or gradients never reach the encoder (the bug that
+        # silently no-op'd the old LoRA path).
+        self.backbone_frozen: bool = not any(p.requires_grad for p in backbone.parameters())
 
     def forward(self, images: torch.Tensor) -> dict[str, list[torch.Tensor]]:
         """Inference forward. images: (B, 3, H, W).
@@ -226,7 +299,7 @@ class DetectionModel(nn.Module):
         Returns dict {'boxes': List[Tensor], 'scores': List[Tensor], 'labels': List[Tensor]}
         (one entry per batch image; lists of length B).
         """
-        from torchvision.ops import nms
+        from torchvision.ops import batched_nms, nms
 
         b, _, h, w = images.shape
         ph = h // self.patch_size
@@ -261,7 +334,13 @@ class DetectionModel(nn.Module):
                 scores_out.append(flat_scores)
                 labels_out.append(flat_labels)
                 continue
-            keep_idx = nms(flat_boxes, flat_scores, self.nms_iou_threshold)[: self.max_detections]
+            # Both nms and batched_nms return indices in decreasing score order,
+            # so a plain truncation yields the top-`max_detections` detections.
+            if self.nms_per_class:
+                keep_idx = batched_nms(flat_boxes, flat_scores, flat_labels, self.nms_iou_threshold)
+            else:
+                keep_idx = nms(flat_boxes, flat_scores, self.nms_iou_threshold)
+            keep_idx = keep_idx[: self.max_detections]
             boxes_out.append(flat_boxes[keep_idx])
             scores_out.append(flat_scores[keep_idx])
             labels_out.append(flat_labels[keep_idx])
@@ -272,26 +351,15 @@ class DetectionModel(nn.Module):
         _, _, h, w = images.shape
         ph = h // self.patch_size
         pw = w // self.patch_size
-        with torch.no_grad():
+        # Only suppress backbone grads when the encoder is frozen; otherwise the
+        # encoder is being fine-tuned (full/partial/lora) and needs autograd.
+        backbone_ctx = torch.no_grad() if self.backbone_frozen else contextlib.nullcontext()
+        with backbone_ctx:
             _, spatial = self.backbone(images)
         fmap = self.fpn(spatial, spatial_shape=(ph, pw))
         cls_logits, box_reg = self.head(fmap)
         anchors = self.anchor_gen(fmap)
         return cls_logits, box_reg, anchors
-
-    @classmethod
-    def from_mlflow(cls, model_uri: str) -> DetectionModel:
-        """Load a serialized DetectionModel from MLflow UC registry.
-
-        Note: this returns the inner DetectionModel; the MLflow pyfunc wrapper lives in
-        src/dais26_dentex/serve/detector_pyfunc.py.
-        """
-        import mlflow
-
-        loaded = mlflow.pytorch.load_model(model_uri)
-        if not isinstance(loaded, cls):
-            raise TypeError(f"Expected {cls.__name__}, got {type(loaded).__name__}")
-        return loaded
 
 
 def calibrate_anchors(

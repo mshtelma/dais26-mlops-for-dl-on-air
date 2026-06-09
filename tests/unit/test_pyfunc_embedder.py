@@ -43,7 +43,7 @@ def embedder_artifacts(tmp_path: Path, monkeypatch) -> dict[str, str]:
     )
     from dais26_dentex.models.backbones import BackboneInfo
 
-    def fake_load(name, revision=None, cache_dir=None, device="cpu"):
+    def fake_load(name, revision=None, cache_dir=None, device="cpu", local_files_only=False):
         return _FakeBackbone(), BackboneInfo(
             name=name,
             summary_dim=1152,

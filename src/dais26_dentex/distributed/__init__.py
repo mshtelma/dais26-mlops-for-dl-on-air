@@ -1,9 +1,7 @@
 """Distributed-training primitives.
 
 Re-exports from `primitives` so callers write `from dais26_dentex.distributed
-import is_rank0, rank0_first`. The legacy import path
-`dais26_dentex.train.distributed_utils` keeps working with a
-DeprecationWarning for one release.
+import is_rank0, rank0_first`.
 """
 
 from dais26_dentex.distributed.barrier_dance import rank0_first

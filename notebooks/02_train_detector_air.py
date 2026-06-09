@@ -24,6 +24,15 @@ dbutils.library.restartPython()
 # the @distributed closure, so dbutils / spark are NOT needed on workers.
 model_name = DETECTOR_LORA_MODEL_SHORT if TRAIN_USE_LORA else DETECTOR_MODEL_SHORT
 
+# HF token for gated backbones (e.g. DINOv3). Read on the driver from the
+# secret scope and capture as a plain-string local so it flows into the
+# @distributed closure (AIR workers don't inherit driver env or dbutils).
+# Guarded so the C-RADIO path still works when the scope/secret is absent.
+try:
+    hf_token = dbutils.secrets.get("dais26-secrets", "hf-token")
+except Exception:
+    hf_token = ""
+
 # COMMAND ----------
 from serverless_gpu import distributed
 
@@ -37,6 +46,12 @@ def run_train():
     import os
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
     os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "600"
+    # Gated-model auth for the backbone download. `load_backbone` reads
+    # os.environ.get("HF_TOKEN"); set it here (BEFORE the deferred
+    # train_detector import) from the closure-captured driver value. No-op for
+    # the C-RADIO path when the secret is absent (empty string).
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token
     # MLflow auto-resolves the experiment from MLFLOW_EXPERIMENT_NAME if no
     # explicit set_experiment call has run yet. Set inside the worker because
     # AIR workers don't inherit the driver's process env.

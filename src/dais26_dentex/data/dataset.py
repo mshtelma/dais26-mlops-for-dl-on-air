@@ -39,6 +39,15 @@ class DENTEXDetectionDataset(Dataset):
     def __len__(self) -> int:
         return len(self.images)
 
+    def per_image_label_sets(self) -> list[set[int]]:
+        """Return the set of category ids present in each image, by dataset index.
+
+        Cheap (annotation-only; no image decode) so a sampler can be built from
+        it. Used for class-balanced oversampling (see
+        :func:`build_caries_oversampled_indices`).
+        """
+        return [{ann["category_id"] for ann in self.ann_by_img[img["id"]]} for img in self.images]
+
     def __getitem__(self, idx: int):
         info = self.images[idx]
         img = np.array(Image.open(self.images_dir / info["file_name"]).convert("RGB"))
@@ -56,6 +65,55 @@ class DENTEXDetectionDataset(Dataset):
             "image_id": torch.tensor(info["id"]),
         }
         return img, target
+
+
+class IndexRemapDataset(Dataset):
+    """Wrap a dataset, exposing it through a (possibly repeated) index list.
+
+    ``IndexRemapDataset(base, [0, 0, 1, 2, 2, 2])`` makes ``base[0]`` appear
+    twice and ``base[2]`` thrice per epoch. This is the DDP-safe way to
+    oversample: a longer flat index list works transparently with
+    ``DistributedSampler`` (which only knows ``len`` and integer indices),
+    unlike ``WeightedRandomSampler`` which has no distributed variant.
+    """
+
+    def __init__(self, base: Dataset, indices: list[int]) -> None:
+        self.base = base
+        self.indices = list(indices)
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, i: int):
+        return self.base[self.indices[i]]
+
+
+def build_caries_oversampled_indices(
+    label_sets: list[set[int]],
+    factor: float,
+    positive_class: int = 0,
+) -> list[int]:
+    """Build an expanded index list that oversamples ``positive_class`` images.
+
+    Every image appears at least once. Images containing ``positive_class``
+    (Caries id 0) appear ``floor(factor)`` times, plus one extra copy for the
+    first ``round(frac * n_pos)`` positives (in index order) where
+    ``frac = factor - floor(factor)``. Deterministic — no RNG — so every DDP
+    rank constructs an identical list. ``factor <= 1.0`` returns the identity
+    index list (legacy behavior).
+    """
+    base = list(range(len(label_sets)))
+    if factor <= 1.0:
+        return base
+    positives = [i for i, labs in enumerate(label_sets) if positive_class in labs]
+    full = int(factor)
+    frac = factor - full
+    expanded = list(base)
+    for _ in range(full - 1):  # `base` already contributes one copy
+        expanded.extend(positives)
+    extra = round(frac * len(positives))
+    expanded.extend(positives[:extra])
+    return expanded
 
 
 def detection_collate(batch):

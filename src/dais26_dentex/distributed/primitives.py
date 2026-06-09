@@ -5,9 +5,6 @@ Single source of truth shared by:
   * the `sgcli`/`torchrun -m dais26_dentex.train.cli` entrypoint
 
 Safe to call when WORLD_SIZE=1 (everything degrades to a no-op).
-
-Moved from `dais26_dentex.train.distributed_utils` in Phase 1; the old
-import path is preserved as a deprecation shim.
 """
 
 from __future__ import annotations

@@ -30,6 +30,7 @@ def configure_hf_env(
     *,
     allow_transfer: bool = False,
     download_timeout: int | None = 600,
+    offline: bool = False,
 ) -> None:
     """Set the HuggingFace environment variables we standardize on.
 
@@ -43,6 +44,14 @@ def configure_hf_env(
             See docs/RUNBOOK.md#hf-transfer-fuse-incompat.
         download_timeout: Seconds passed to `HF_HUB_DOWNLOAD_TIMEOUT`. None
             leaves whatever was there.
+        offline: When True, force `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`
+            so transformers loads strictly from the local cache and never
+            contacts huggingface.co. Required in network-restricted Model
+            Serving containers where the HF cache is bundled into the model
+            artifact — otherwise `from_pretrained(trust_remote_code=True)`
+            tries to resolve the remote-code revision online and the model
+            server fails to load. Leave False for training (needs network to
+            download on a cold cache).
 
     Idempotent. Safe to call from any rank in a distributed run; the values
     are process-local.
@@ -59,3 +68,7 @@ def configure_hf_env(
 
     if download_timeout is not None:
         os.environ.setdefault(HF_ENV_DOWNLOAD_TIMEOUT, str(download_timeout))
+
+    if offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"

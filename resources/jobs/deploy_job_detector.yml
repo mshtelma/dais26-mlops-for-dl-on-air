@@ -1,0 +1,100 @@
+resources:
+  jobs:
+    deploy_job_detector:
+      name: "dais26_deploy_job_detector_${bundle.target}"
+      description: "MLflow 3 deployment job (CHALLENGER side) for the dev detector models. A new @challenger version auto-triggers: Evaluation (COCO eval on the DENTEX val split: challenger must beat the registered @champion on >=2 of 3 metrics mAP_50/mAP_75/mAP_50_95; auto-pass if no champion) -> Approval (human sets UC tag Approval_Check=Approved) -> RegisterChampion (lineage-preserving copy dev->prod single detector_champion, set @champion_candidate). The cross-schema copy creates a new detector_champion version, which auto-triggers the prod CHAMPION-side job (deploy_champion_job, via the supported model-version deployment trigger) to deploy + smoke-test + flip @champion + refresh embeddings/Vector-Search/drift. Connect this job to the dev models via resources/jobs/connect_deployment_job.yml + notebooks/13 (target=dev)."
+      tags:
+        project: "dais26-vfm"
+        component: "deployment-job"
+
+      # Deployment jobs run one version at a time; serialize so two challengers
+      # don't race the same endpoint / champion alias.
+      max_concurrent_runs: 1
+
+      # Challenger side only: GPU queue wait + databricks_ai_v5 cold-start + ViT
+      # backbone load before the val eval, then the CPU approval + cross-schema copy.
+      # The champion-side deploy/embeddings/VS/drift run in deploy_champion_job.
+      timeout_seconds: 7200
+
+      queue:
+        enabled: true
+
+      # Email on success (a challenger reached RegisterChampion) and on any task
+      # failure (gate failure / error — surfaced immediately since retries are off).
+      email_notifications:
+        on_success:
+          - "puneet.jain@databricks.com"
+        on_failure:
+          - "puneet.jain@databricks.com"
+        no_alert_for_skipped_runs: true
+
+      # Job-level parameters the MLflow deployment-job framework injects when a new
+      # version triggers the run. They propagate to every notebook task as widgets
+      # (read via dbutils.widgets.get in 10/11/12). model_name is the full dev UC
+      # name; model_version is the numeric version that got @challenger.
+      parameters:
+        - name: model_name
+          default: ""
+        - name: model_version
+          default: ""
+
+      # run_as is inherited from the bundle target: current user on dev (mode:
+      # development), var.sp_app_id on prod (databricks.yml prod target run_as).
+      # The deployment job triggers with the model owner's credentials, so the
+      # owner must be able to write the prod/champion schema (granted in 00_setup).
+
+      environments:
+        # Serverless CPU for Approval + Promote (driver-only; the endpoint uses
+        # GPU serving compute). Wheel attached via the serverless environments
+        # block (serverless tasks reject the task-level `libraries` field).
+        - environment_key: "default"
+          spec:
+            environment_version: "3"
+            dependencies:
+              - "../../dist/*.whl"
+        # Single serverless GPU for the test-split eval. base_environment
+        # databricks_ai_v5 is the serverless-GPU base (mirrors eval_comparison).
+        # NOTE: no environment_version on GPU envs — base_environment selects it.
+        - environment_key: "gpu"
+          spec:
+            base_environment: databricks_ai_v5
+            dependencies:
+              - "../../dist/*.whl"
+
+      tasks:
+        - task_key: "Evaluation"
+          notebook_task:
+            notebook_path: "../../notebooks/10_deploy_eval_task.py"
+          environment_key: "gpu"
+          compute:
+            # CLI enum accepts GPU_1xA10 / GPU_8xH100; A10 is plenty for 250
+            # frozen-backbone forward passes.
+            hardware_accelerator: GPU_1xA10
+          # No retries on any deployment-job task: fail fast so a bad challenger /
+          # gate failure surfaces immediately (no silent re-run masking it).
+
+        # Task name MUST start with "approval" (case-insensitive) for Databricks to
+        # treat it as the deployment-job approval gate and show the Approve button on
+        # the model version page. When a human clicks Approve, the framework writes a
+        # UC tag whose KEY == this task name (`Approval_Check`) and value `Approved`,
+        # then auto-repairs the run — so the task name and the tag the notebook checks
+        # (notebooks/11, APPROVAL_TAG="Approval_Check") MUST match exactly.
+        - task_key: "Approval_Check"
+          depends_on:
+            - task_key: "Evaluation"
+          notebook_task:
+            notebook_path: "../../notebooks/11_deploy_approval_task.py"
+          environment_key: "default"
+          # Human-in-the-loop gate: fail fast and wait for a human to click Approve
+          # (or set Approval_Check=Approved) + repair-run. Email when this task starts
+          # so a reviewer knows a challenger is waiting on approval.
+          email_notifications:
+            on_start:
+              - "puneet.jain@databricks.com"
+
+        - task_key: "RegisterChampion"
+          depends_on:
+            - task_key: "Approval_Check"
+          notebook_task:
+            notebook_path: "../../notebooks/12_promote_task.py"
+          environment_key: "default"

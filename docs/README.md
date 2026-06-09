@@ -41,6 +41,18 @@ in editable mode so changes to `src/dais26_dentex/` are immediately reflected. N
 in `notebooks/00_config.py` — there are no `dbutils.widgets` and no DAB `base_parameters`; edit the
 config file before launching.
 
+**All UC names are config-driven from `notebooks/00_config.py`.** The current defaults are:
+
+| Config knob | Default | Drives |
+|-------------|---------|--------|
+| `CATALOG` | `mlops_pj` | catalog for all schemas/tables/models |
+| `SCHEMA` | `dais26_vfm` | schema |
+| `TABLE_PREFIX` | `dais26_dentex_` | table/index prefix so multiple projects share one schema (e.g. `dais26_dentex_train_embeddings`) |
+| `BACKBONE` | `cradio_v4_so400m` | backbone + the backbone-keyed model/endpoint names (`cradio_detector`, `dais26-cradio-detector-dev`) |
+
+Switch `BACKBONE` to `dinov3_vitl16` for the gated DINOv3 comparison path. The command examples below
+use the legacy `ml_dev` / `cradio_detector` names; substitute your configured values.
+
 ### Step 3 — Authenticate with Databricks
 
 ```bash
@@ -121,8 +133,13 @@ This deploys **only** UC resources and job definitions. It does **not** deploy s
 What gets created:
 - UC schema `ml_dev.dais26_vfm` with volumes `dentex_raw` and `model_cache`
 - MLflow experiment `/Users/<you>/dais26_vfm_experiment`
-- Job definitions: `train_detector`, `precompute_embeddings`, `drift_monitor`
+- Dev job definitions: `train_detector`, `campaign_sweep`, `eval_comparison`, `eval_threshold_grid`
 - Secret scope `dais26-secrets` (for optional DINOv3 path)
+
+> The embedding/monitoring jobs (`precompute_embeddings`, `create_vector_search`,
+> `drift_monitor`) and the champion schema/models are **prod-only** — they deploy
+> under `databricks bundle deploy -t prod` because their tables and VS index live in
+> the champion schema (`dais26_vfm_prod`).
 
 ### Step 7 — Run the training job (Phase 2)
 
@@ -172,18 +189,71 @@ To run a faster 1-epoch validation gate instead of 10 epochs:
 databricks bundle run train_detector -t dev --params train_epochs=1
 ```
 
+### Step 8b (optional) — Hyperparameter sweep (Phase 2b)
+
+If the single training run plateaus (the DENTEX detector has historically hit a ~3% mAP@50
+ceiling), run the HPO sweep, which tunes the detector head **and** fine-tunes the
+C-RADIO / DINOv3 backbone:
+
+```bash
+# 1. (recommended) audit the architecture first — anchors, positive ratio, NMS, delta clamp
+databricks bundle run train_detector -t dev   # or open notebooks/02a_arch_probe.py and run all
+
+# 2. launch the sweep (single driver; pick a stage)
+databricks bundle run campaign_sweep -t dev -- --params sweep_stage=dinov3_s1
+```
+
+> See [HPO.md](HPO.md) for the full push-to-0.60 mAP campaign — the architectural fixes
+> (per-level anchors, per-class NMS), the winning runs, and the stage-by-stage sweep record.
+
+The sweep runs as a parent MLflow run with one nested child run per trial, sharing the same
+`Trainer` core as Step 7. It explores learning rates, `backbone_mode`
+(`frozen`/`lora`/`partial`/`full`), unfreeze depth, anchor geometry, and head
+regularization. All sweep parameters are config-driven from the `SWEEP_*` block in
+`notebooks/00_config.py`:
+
+| Config knob | Default | Drives |
+|-------------|---------|--------|
+| `SWEEP_STRATEGY` | `random` | `random` sampling or full `grid` |
+| `SWEEP_MAX_TRIALS` | `12` | trial budget |
+| `SWEEP_TRIAL_EPOCHS` | `3` | epochs per trial (short, for ranking) |
+| `SWEEP_PRIMARY_METRIC` | `val_map_50` | metric `select_best` ranks on |
+| `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` → `@candidate` |
+| `SWEEP_SEARCH_SPACE` | see config | per-knob value lists (incl. `backbone_mode`, `anchor_mode`) |
+
+Expected wall time: up to **48 hours** on `GPU_8xH100` (the job carries a 48-hour timeout).
+The winning trial is re-trained at full epochs, registered to UC, and aliased `@challenger`
+only when it clears the best-in-experiment gate; the trailing `confirm_challenger` task then
+asserts the alias landed. Promotion to `@champion` happens via the `deploy_job_detector`
+deployment job (eval → approval → cross-schema promote).
+
 ### Step 9 — Precompute embeddings (Phase 3)
 
 ```bash
-databricks bundle run precompute_embeddings -t dev
+databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 ```
 
-This runs `03_precompute_embeddings.py` on an AIR H100 cluster, which:
-- Computes C-RADIOv4 `summary` embeddings (dim 1152) for all 1005 DENTEX images
-- Writes to `ml_dev.dais26_vfm.train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
-- Creates the Mosaic AI Vector Search index `ml_dev.dais26_vfm.embeddings_index`
+`precompute_embeddings` is a task inside the prod `deploy_champion_job` (not a standalone job).
+This runs `03_precompute_embeddings.py` on serverless GPU, which:
+- Computes the backbone `summary` embeddings (C-RADIOv4: dim 1152, DINOv3: dim 1024) for all 1005 DENTEX images
+- Writes to `<catalog>.<schema>.<prefix>train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
 
-Wait for completion (~15-20 minutes).
+Wait for completion (~15-20 minutes). The Vector Search index is **not** created here unless
+`EMBEDDINGS_VS_ENDPOINT` and `EMBEDDINGS_VS_INDEX` are both set in `00_config.py`; otherwise create
+it explicitly in the next step.
+
+### Step 9b — Create the Vector Search endpoint + index
+
+```bash
+databricks bundle run deploy_champion_job -t prod --only create_vector_search
+```
+
+`create_vector_search` is also a task inside `deploy_champion_job`.
+This runs `04b_create_vector_search.py` (no GPU), which idempotently creates the VS endpoint
+(`dais26-vfm-vs`) and a DELTA_SYNC index over the embeddings table, triggers a sync, waits for the
+index to come `ONLINE`, and runs a smoke-test similarity query. The embedding dimension is **derived
+from the source table** (not hardcoded), so it stays correct for any backbone. The job fails fast
+if the embeddings table from step 9 is empty.
 
 ### Step 10 — Smoke test the detector endpoint
 
@@ -231,7 +301,7 @@ w = WorkspaceClient()
 results = w.vector_search_indexes.query_index(
     index_name="ml_dev.dais26_vfm.embeddings_index",
     columns=["image_id", "diagnosis"],
-    query_vector=[0.0] * 1152,   # backbone_info.summary_dim for C-RADIOv4
+    query_vector=[0.0] * 1152,   # backbone summary_dim: C-RADIOv4=1152, DINOv3-ViTL16=1024
     num_results=10,
 )
 
@@ -249,7 +319,7 @@ Expected: 10 results with `image_id` and `diagnosis` columns.
 # Create service principal first (see RUNBOOK.md)
 databricks bundle deploy -t prod
 databricks bundle run train_detector -t prod
-databricks bundle run precompute_embeddings -t prod
+databricks bundle run deploy_champion_job -t prod
 ```
 
 The `prod` target sets `scale_to_zero: false` (minimum 1 replica always warm) and uses a service
@@ -283,6 +353,11 @@ Node type defaults: AWS `g5.12xlarge` (4x A10G), Azure `Standard_NC24ads_A100_v4
 | `FileNotFoundError: Could not locate pyproject.toml` at log-time | Stale wheel built before the `force-include` block was added | Re-run `uv build`; verify with `python -m zipfile -l dist/*.whl \| grep _pyproject.toml` |
 | `ModuleNotFoundError: timm` / `einops` / `open_clip` at serving | Runtime dep missing from `[tool.dais26.serving-deps].detector` | Add to that table in `pyproject.toml`; `assert_serving_reqs_match_pyproject` is the CI guard |
 | `trust_remote_code` error loading C-RADIOv4 | Transformers version mismatch | Pin `transformers>=4.48.0` in your cluster; check pyproject.toml |
+| Endpoint `DEPLOYMENT_FAILED` / `ModuleNotFoundError: transformers_modules` at model-server load | Model logged as a pickled pyfunc instance captured the dynamic `trust_remote_code` backbone class | Already fixed — the trainer logs via **models-from-code** (`serve/detector_model_script.py`). Re-train (or re-log) against current code; do not pickle a `DetectorPyfunc()` instance |
+| `ModuleNotFoundError: dais26_dentex` at serving | Package source not bundled with the model | `MlflowReporter.log_pyfunc` passes `code_paths=[<dais26_dentex dir>]` by default; verify the model's `code/` dir contains the package |
+| Endpoint serves on CPU (0% GPU util, slow) on GPU_SMALL | Unpinned `torch` resolved to a cu126/cu128 wheel the T4 driver (CUDA 12.4) can't init → `torch.cuda.is_available()` is False | Keep `torch==2.6.0` / `torchvision==0.21.0` (cu124) pinned in `[tool.dais26.serving-deps]` |
+| C-RADIOv4/DINOv3 backbone tries to reach huggingface.co at serving and fails to start | Online HF load in an egress-less serving container | Serving forces `local_files_only` + offline HF env from the bundled `model_cache` artifact (handled in `detector_pyfunc.load_context`) |
+| DINOv3 backbone download 401/403 during training | Gated repo, missing HF token | Put the token in secret `dais26-secrets/hf-token`; `02_train_detector_air.py` reads it on the driver and forwards `HF_TOKEN` into the `@distributed` worker |
 | HF download fails with `os error 5` / `os error 95` on AIR | `HF_HUB_ENABLE_HF_TRANSFER=1` or `hf-xet` writing to UC Volume FUSE | Set `HF_HUB_ENABLE_HF_TRANSFER=0` and `HF_HUB_DISABLE_XET=1` *before* importing `dais26_dentex` (use `platform.hf_env.configure_hf_env`) — see [RUNBOOK.md#hf-transfer-fuse-incompat](RUNBOOK.md#hf-transfer-fuse-incompat) |
 | Cold-cache HF download deadlock on multi-rank run | Naive `barrier()` doesn't fix the from_pretrained race | Use `distributed.barrier_dance.rank0_first` (already wired in `models/builder.py`) — see [RUNBOOK.md#hf-cache-race](RUNBOOK.md#hf-cache-race) |
 | `BarrierTimeoutError` from `safe_barrier` | A rank crashed earlier; NCCL would have hung silently | Inspect ranks' logs in order; the bounded wait surfaces the dead-rank instead of hanging |

@@ -1,30 +1,40 @@
-resources:
-  jobs:
-    drift_monitor:
-      name: "dais26_drift_monitor_${bundle.target}"
-      description: "Compute embedding drift on recent detector inference traffic vs training reference. AIR-only via serverless notebook task."
-      tags:
-        - key: "project"
-          value: "dais26-vfm"
-        - key: "component"
-          value: "monitoring"
-      schedule:
-        quartz_cron_expression: "0 0 * * * ?"
-        timezone_id: "UTC"
-        pause_status: "PAUSED"                  # unpause manually post-demo
-      max_retries: 0
-      timeout_seconds: 1800
+targets:
+  # PROD-only: monitors the served (prod) detector's inference traffic against the
+  # prod-schema reference embeddings (TRAIN_EMBEDDINGS_TABLE) and writes drift
+  # scores to the prod-schema DRIFT_SCORES_TABLE. Runs as the prod run_as SP.
+  prod:
+    resources:
+      jobs:
+        drift_monitor:
+          name: "dais26_drift_monitor_${bundle.target}"
+          description: "Compute embedding drift on recent detector inference traffic vs training reference. AIR-only via serverless notebook task."
+          tags:
+            project: "dais26-vfm"
+            component: "monitoring"
+          schedule:
+            quartz_cron_expression: "0 0 * * * ?"
+            timezone_id: "UTC"
+            pause_status: "PAUSED"                  # unpause manually post-demo
+          timeout_seconds: 1800
 
-      # NO job_clusters block — AIR-only. Serverless notebook task.
-      #
-      # All notebook config (catalog / schema / backbone / DRIFT_MODE / knn_k /
-      # alert_threshold / detector_inference_table) lives in notebooks/00_config.py
-      # and is pulled in via `%run ./00_config`. To use this as a scheduled monitor,
-      # set DRIFT_MODE = "scheduled" in 00_config.py.
+          # NO job_clusters block — AIR-only. Serverless notebook task. The wheel is
+          # attached via the serverless `environments` block below (serverless tasks
+          # reject the task-level `libraries` field).
+          #
+          # All notebook config (catalog / schema / backbone / DRIFT_MODE / knn_k /
+          # alert_threshold / detector_inference_table) lives in notebooks/00_config.py
+          # and is pulled in via `%run ./00_config`. To use this as a scheduled monitor,
+          # set DRIFT_MODE = "scheduled" in 00_config.py.
 
-      tasks:
-        - task_key: "compute_drift"
-          notebook_task:
-            notebook_path: "../../notebooks/05_drift_demo.py"
-          libraries:
-            - whl: "../../dist/*.whl"
+          environments:
+            - environment_key: "default"
+              spec:
+                environment_version: "3"
+                dependencies:
+                  - "../../dist/*.whl"
+
+          tasks:
+            - task_key: "compute_drift"
+              notebook_task:
+                notebook_path: "../../notebooks/05_drift_demo.py"
+              environment_key: "default"

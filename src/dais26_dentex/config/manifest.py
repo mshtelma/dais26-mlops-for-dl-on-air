@@ -33,13 +33,20 @@ from typing import Any
 
 from dais26_dentex.config.constants import ARTIFACT_FORMAT_VERSION
 
+# CLIP normalisation stats — the default for pre-existing manifests written
+# before `image_mean/std` were recorded (every such artifact was C-RADIO, which
+# uses CLIP norm). Duplicated here (not imported from data.transforms) so the
+# lightweight config package doesn't pull in torch/torchvision at import time.
+_DEFAULT_IMAGE_MEAN = [0.48145466, 0.4578275, 0.40821073]
+_DEFAULT_IMAGE_STD = [0.26862954, 0.26130258, 0.27577711]
+
 
 class IncompatibleArtifactError(ValueError):
     """Raised when a manifest's ``version`` is not the one we can load.
 
     Carries enough context for the operator to know what's needed: the
-    artifact's claimed version, the version we expected, and a hint about
-    the v1 → v2 migration (``DetectorPyfuncV1``).
+    artifact's claimed version, the version we expected, and a hint to
+    re-train when an older (v1) artifact is encountered.
     """
 
     def __init__(self, found: int | None, expected: int, *, hint: str = "") -> None:
@@ -58,6 +65,22 @@ class BackboneSpec:
     summary_dim: int
     spatial_dim: int
     patch_size: int
+    # How the backbone was trained: frozen | lora | full | partial. Drives
+    # whether the serving loader must restore fine-tuned backbone weights from
+    # the saved state dict (full/partial) instead of re-fetching the pretrained
+    # encoder from HF. Defaults to "frozen" so pre-existing manifests load.
+    trained_mode: str = "frozen"
+    # Input normalisation stats the model was trained with (CLIP for C-RADIO,
+    # ImageNet for DINOv2/v3). Serving MUST normalise with these exact values or
+    # the encoder sees OOD inputs. Defaults to CLIP so pre-v.next manifests
+    # (all C-RADIO) keep reproducing their training-time preprocessing.
+    image_mean: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_MEAN))
+    image_std: list[float] = field(default_factory=lambda: list(_DEFAULT_IMAGE_STD))
+    # Multi-layer ViT feature-fusion depths (DINOv3 only). `None` (default) =
+    # last-layer-only, so pre-existing manifests load unchanged. When set, the
+    # serving loader must rebuild the fusion combiner so the saved
+    # `backbone.fusion.*` weights have a home to load into.
+    fusion_layers: list[int] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +92,14 @@ class DetectorSpec:
     nms_iou_threshold: float = 0.5
     max_detections: int = 100
     input_size: int = 1024
+    # Anchor layout + NMS mode. Defaulted so pre-existing v2 manifests (written
+    # before these knobs) still load and reproduce the legacy absolute-layout,
+    # class-agnostic-NMS model. `anchor_octaves=None` defers to the module
+    # default octave set when rebuilding the AnchorGenerator at serve/eval time.
+    anchor_layout: str = "absolute"
+    anchor_base_scale: float = 4.0
+    anchor_octaves: list[float] | None = None
+    nms_per_class: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,12 +146,10 @@ def load_manifest(path: str | Path) -> Manifest:
         raise ValueError(f"manifest.json must be a JSON object; got {type(raw).__name__}")
 
     found_raw = raw.get("version")
-    found: int | None = int(found_raw) if isinstance(found_raw, (int, str)) and str(found_raw).isdigit() else None
+    found: int | None = int(found_raw) if isinstance(found_raw, int | str) and str(found_raw).isdigit() else None
     if found != ARTIFACT_FORMAT_VERSION:
         hint = (
-            "v1 artifacts are still loadable via "
-            "`dais26_dentex.serve.detector_pyfunc.DetectorPyfuncV1`; re-train "
-            "to produce v2."
+            "Pre-manifest-v2 (v1) artifacts are no longer loadable; re-train to produce v2."
             if found in (1, None)
             else ""
         )

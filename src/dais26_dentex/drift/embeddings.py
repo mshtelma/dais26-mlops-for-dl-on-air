@@ -10,16 +10,26 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def _bytes_to_tensor(image_bytes: bytes, target_size: int = 224) -> torch.Tensor:
-    """Decode bytes -> PIL -> normalized tensor (3, H, W). Uses CLIP normalization."""
+def _bytes_to_tensor(
+    image_bytes: bytes,
+    target_size: int = 224,
+    mean: list[float] | None = None,
+    std: list[float] | None = None,
+) -> torch.Tensor:
+    """Decode bytes -> PIL -> normalized tensor (3, H, W).
+
+    ``mean``/``std`` default to CLIP; pass the backbone's
+    ``BackboneInfo.image_mean/std`` for DINOv2/v3 (ImageNet) so drift embeddings
+    match the production encoder's preprocessing.
+    """
     from dais26_dentex.data.transforms import CLIP_MEAN, CLIP_STD
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB").resize((target_size, target_size))
     arr = np.array(img, dtype=np.float32) / 255.0
-    mean = np.array(CLIP_MEAN, dtype=np.float32).reshape(3, 1, 1)
-    std = np.array(CLIP_STD, dtype=np.float32).reshape(3, 1, 1)
+    mean_a = np.array(mean if mean is not None else CLIP_MEAN, dtype=np.float32).reshape(3, 1, 1)
+    std_a = np.array(std if std is not None else CLIP_STD, dtype=np.float32).reshape(3, 1, 1)
     arr = arr.transpose(2, 0, 1)  # HWC -> CHW
-    arr = (arr - mean) / std
+    arr = (arr - mean_a) / std_a
     return torch.from_numpy(arr)
 
 
@@ -29,6 +39,8 @@ def compute_embeddings(
     batch_size: int = 32,
     device: str = "cuda",
     image_size: int = 224,
+    image_mean: list[float] | None = None,
+    image_std: list[float] | None = None,
 ) -> np.ndarray:
     """Compute L2-normalized summary embeddings for a batch of images.
 
@@ -39,6 +51,8 @@ def compute_embeddings(
         batch_size: forward-pass batch size.
         device: 'cuda' or 'cpu'.
         image_size: resize target. C-RADIOv4 accepts variable sizes; 224 is fastest for drift.
+        image_mean/image_std: normalisation stats. Default CLIP; pass the
+            backbone's ``BackboneInfo.image_mean/std`` for DINOv2/v3.
 
     Returns:
         np.ndarray of shape (N, summary_dim) with L2-normalized rows.
@@ -50,7 +64,7 @@ def compute_embeddings(
     else:
         if not images:
             return np.empty((0, 0), dtype=np.float32)
-        tensors = torch.stack([_bytes_to_tensor(b, image_size) for b in images])
+        tensors = torch.stack([_bytes_to_tensor(b, image_size, image_mean, image_std) for b in images])
 
     embeddings: list[np.ndarray] = []
     with torch.no_grad():

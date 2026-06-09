@@ -1,4 +1,4 @@
-"""Tests for dais26_dentex.train.distributed_utils — env-var detection + unwrap_model."""
+"""Tests for dais26_dentex.distributed primitives — env-var detection + unwrap_model."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from dais26_dentex.train import distributed_utils as du
+from dais26_dentex import distributed as du
 
 
 def test_world_size_default():

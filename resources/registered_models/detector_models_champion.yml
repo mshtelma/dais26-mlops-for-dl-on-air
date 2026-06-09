@@ -1,0 +1,36 @@
+# PROD champion registered model — SINGLE, backbone-AGNOSTIC. PROD TARGET ONLY.
+# Scoped under targets.prod (not a global `include`) on purpose: in dev mode DABs
+# prefixes managed resource names (`dev_<user>_detector_champion`) which would clash
+# with the literal CHAMPION_MODEL_SHORT hardcoded in notebooks/00_config.py and create
+# an empty, disconnected duplicate. Prod mode applies no prefix, so it resolves to the
+# literal `detector_champion`. schema_name references the bundle-managed schema resource
+# so Terraform creates the schema first.
+#
+# Broad/prod deployment comes from ONE champion model in ONE schema, regardless of
+# which dev backbone (C-RADIOv4 / DINOv3 / ...) won — prod is never two competing
+# architecture-named champions. The RegisterChampion task (notebooks/12) copies the
+# approved dev winner here (lineage preserved), tags the source backbone, and sets
+# @champion_candidate; the prod deploy_champion_job (notebooks/14) flips @champion on a
+# passing smoke test.
+#
+# The prod SP needs MANAGE here (not just EXECUTE): connect_deployment_job runs as the
+# SP on -t prod and calls update_registered_model(deployment_job_id=...) to wire the
+# model-version deployment trigger, which UC gates on MANAGE. RegisterChampion (running
+# as the SP) also needs MANAGE to copy new versions + set aliases on this model.
+#
+# catalog_name / schema_name / name MUST stay in sync with CHAMPION_CATALOG /
+# CHAMPION_SCHEMA / CHAMPION_MODEL_SHORT in notebooks/00_config.py.
+targets:
+  prod:
+    resources:
+      registered_models:
+        detector_champion:
+          name: detector_champion
+          catalog_name: mlops_pj
+          schema_name: "${resources.schemas.dais26_vfm_prod.name}"
+          comment: "PROD champion detector (backbone-agnostic): lineage-preserving copy of the approved dev winner of any architecture, alias @champion."
+          grants:
+            - principal: "${var.sp_app_id}"
+              privileges:
+                - EXECUTE
+                - MANAGE

@@ -100,3 +100,46 @@ def test_train_transforms_resize():
     out = tfm(image=img, bboxes=bboxes, class_labels=class_labels)
 
     assert out["image"].shape == (3, 64, 64)
+
+
+# ---------------------------------------------------------------------------
+# augmentation knobs (push-to-0.60): multi-scale + rotation must keep the
+# output a fixed `img_size` square so batching is unaffected.
+# ---------------------------------------------------------------------------
+
+
+def test_train_transforms_multiscale_keeps_canvas_shape():
+    from dais26_dentex.data.transforms import get_train_transforms
+
+    tfm = get_train_transforms(img_size=128, multiscale_range=[0.5, 1.0])
+    img = np.random.randint(0, 256, (256, 200, 3), dtype=np.uint8)
+    bboxes = [[10, 10, 80, 80]]
+    class_labels = [1]
+    for _ in range(8):  # several draws to exercise the random scale
+        out = tfm(image=img, bboxes=bboxes, class_labels=class_labels)
+        assert out["image"].shape == (3, 128, 128)
+
+
+def test_train_transforms_rotation_keeps_canvas_shape():
+    from dais26_dentex.data.transforms import get_train_transforms
+
+    tfm = get_train_transforms(img_size=128, rotation_deg=10.0)
+    img = np.random.randint(0, 256, (128, 128, 3), dtype=np.uint8)
+    bboxes = [[20, 20, 60, 60]]
+    class_labels = [0]
+    out = tfm(image=img, bboxes=bboxes, class_labels=class_labels)
+    assert out["image"].shape == (3, 128, 128)
+
+
+def test_train_transforms_jitter_scale_zero_disables_jitter():
+    """jitter_scale=0 -> no ColorJitter; with hflip disabled and no rotation the
+    pipeline is deterministic geometry + normalize, so two calls match."""
+    from dais26_dentex.data.transforms import get_train_transforms
+
+    tfm = get_train_transforms(img_size=64, hflip_prob=0.0, jitter_scale=0.0)
+    img = np.random.randint(0, 256, (64, 64, 3), dtype=np.uint8)
+    bboxes = [[5, 5, 40, 40]]
+    class_labels = [2]
+    out1 = tfm(image=img, bboxes=bboxes, class_labels=class_labels)
+    out2 = tfm(image=img, bboxes=bboxes, class_labels=class_labels)
+    assert torch.allclose(out1["image"], out2["image"])

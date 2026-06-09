@@ -28,12 +28,14 @@ compute:
   gpu_type: h100
 
 max_retries: 1
-timeout_minutes: 180
+# 8h: full backbone fine-tune + longer schedules (and multi-trial sweeps that
+# reuse this workload) must not be killed mid-run on the H100 pool.
+timeout_minutes: 480
 
 code_source:
   type: snapshot
   snapshot:
-    repo_path: ..                  # YAML lives in sgcli/ ; the repo root is one level up
+    repo_path: .                   # sgcli resolves this relative to CWD; run from the repo root
     # Snapshot the working tree as-is (staged + unstaged changes included) so
     # iterative local edits ship without a commit. sgcli enforces mutual
     # exclusion: allow_uncommitted cannot be combined with git_branch /
@@ -45,12 +47,12 @@ code_source:
 # Parameter values mirror notebooks/00_config.py so the sgcli and notebook
 # launch surfaces train against the exact same UC objects + hyperparameters.
 parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
-  catalog: main                    # CATALOG
-  schema: mshtelma                 # SCHEMA
+  catalog: mlops_pj                # CATALOG
+  schema: dais26_vfm               # SCHEMA
   backbone_name: cradio_v4_so400m  # BACKBONE — internal literal, NOT the HF id
   backbone_revision: main          # BACKBONE_REVISION
-  volume_path: /Volumes/main/mshtelma/dentex_raw   # VOLUME_PATH
-  cache_dir: /Volumes/main/mshtelma/model_cache    # CACHE_DIR
+  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw   # VOLUME_PATH
+  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache    # CACHE_DIR
   epochs: 10                       # TRAIN_EPOCHS
   lr: 0.001                        # TRAIN_LR
   batch_size: 8                    # TRAIN_BATCH_SIZE

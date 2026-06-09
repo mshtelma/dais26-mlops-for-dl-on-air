@@ -24,10 +24,13 @@ def mock_heavy_deps(monkeypatch):
     fake_info.spatial_dim = 64
     fake_info.patch_size = 16
 
-    monkeypatch.setattr(
-        "dais26_dentex.models.backbones.load_backbone",
-        lambda **kw: (fake_bb, fake_info),
-    )
+    def _fake_load(**kw):
+        return (fake_bb, fake_info)
+
+    monkeypatch.setattr("dais26_dentex.models.backbones.load_backbone", _fake_load)
+    # `builder.py` binds `load_backbone` at import time, so patch that reference
+    # too — otherwise build_detector calls the real loader and hits the HF Hub.
+    monkeypatch.setattr("dais26_dentex.models.builder.load_backbone", _fake_load)
 
     import torch.nn as nn
 
@@ -70,7 +73,7 @@ def test_rank0_starts_mlflow_run(mock_heavy_deps, monkeypatch):
         catalog="c",
         schema="s",
         volume_path=None,  # skip dataloaders for unit test
-        epochs=0,
+        epochs=1,
         register_model=False,
         set_candidate_alias=False,
     )
@@ -120,7 +123,7 @@ def test_non_rank0_does_not_start_mlflow_run(mock_heavy_deps, monkeypatch):
         catalog="c",
         schema="s",
         volume_path=None,
-        epochs=0,
+        epochs=1,
         register_model=False,
         set_candidate_alias=False,
     )
@@ -149,7 +152,7 @@ def test_set_registry_uri_only_on_rank0(mock_heavy_deps, monkeypatch):
         catalog="c",
         schema="s",
         volume_path=None,
-        epochs=0,
+        epochs=1,
         experiment_name="/Shared/exp",
         register_model=False,
         set_candidate_alias=False,

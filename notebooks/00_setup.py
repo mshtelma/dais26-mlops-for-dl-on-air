@@ -38,6 +38,15 @@ spark.sql(f"CREATE VOLUME IF NOT EXISTS {CATALOG}.{SCHEMA}.{MODEL_CACHE_VOLUME}"
 
 # COMMAND ----------
 
+# Prod / champion schema (Big Book dev/prod asset split). The deploy job's
+# promote task copies the approved dev version into this schema and registers it
+# as @champion (see notebooks/12_promote_task.py). The dev SCHEMA above holds
+# @challenger versions; this one holds @champion only.
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {CHAMPION_CATALOG}.{CHAMPION_SCHEMA}")
+print(f"Champion schema: {CHAMPION_CATALOG}.{CHAMPION_SCHEMA}")
+
+# COMMAND ----------
+
 # Stage the DENTEX dataset into the volume in three explicit steps
 # (idempotent — skipped entirely if annotations/train.json already exists).
 from pathlib import Path
@@ -116,6 +125,15 @@ if SP_APP_ID:
         f"GRANT READ VOLUME, WRITE VOLUME ON VOLUME {CATALOG}.{SCHEMA}.{MODEL_CACHE_VOLUME} TO `{SP_APP_ID}`",
         f"GRANT SELECT, MODIFY ON TABLE {TRAIN_EMBEDDINGS_TABLE} TO `{SP_APP_ID}`",
         f"GRANT SELECT, MODIFY ON TABLE {DRIFT_SCORES_TABLE} TO `{SP_APP_ID}`",
+        # Prod/champion schema: the promote task (run as the model owner / SP)
+        # copies the approved dev version here and registers it @champion, so the
+        # SP needs USE SCHEMA + CREATE MODEL + APPLY TAG on the prod schema. Guard
+        # on the catalog grant only when the prod schema is in a different catalog.
+        f"GRANT USE CATALOG ON CATALOG {CHAMPION_CATALOG} TO `{SP_APP_ID}`",
+        f"GRANT USE SCHEMA, CREATE MODEL, APPLY TAG ON SCHEMA {CHAMPION_CATALOG}.{CHAMPION_SCHEMA} TO `{SP_APP_ID}`",
+        # Read/execute the dev detector models so copy_model_version can source them.
+        f"GRANT EXECUTE ON MODEL {DETECTOR_MODEL_NAME} TO `{SP_APP_ID}`",
+        f"GRANT APPLY TAG ON SCHEMA {CATALOG}.{SCHEMA} TO `{SP_APP_ID}`",
     ]
     for stmt in grants:
         try:

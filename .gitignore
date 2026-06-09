@@ -44,6 +44,11 @@ htmlcov/
 .databricks/
 .air-discovery.json
 
+# Local MLflow tracking (sqlite backend + file store) — never commit
+mlflow.db
+mlruns/
+mlartifacts/
+
 # IDE
 .vscode/
 .idea/

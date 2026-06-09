@@ -37,7 +37,7 @@ def main() -> int:
 
     if hasattr(text, "decode"):
         text = text.decode("utf-8", errors="ignore")
-    if isinstance(text, (bytes, bytearray)):
+    if isinstance(text, bytes | bytearray):
         text = text.decode("utf-8", errors="ignore")
 
     # Look for GPU memory utilization in Prometheus output

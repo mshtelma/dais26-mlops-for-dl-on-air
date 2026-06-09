@@ -47,16 +47,45 @@ if DRIFT_MODE == "demo":
     clean_bytes = [_read_bytes(p) for p in val_files]
     shifted_bytes = [_shift_image_to_bytes(p) for p in val_files]
 
-    backbone, info = load_backbone(name=BACKBONE, revision=BACKBONE_REVISION,
-                                   cache_dir=CACHE_DIR, device="cuda" if torch.cuda.is_available() else "cpu")
+    # Resolve the SAME backbone that precompute (nb 03) used to build
+    # TRAIN_EMBEDDINGS_TABLE. The prod champion is backbone-agnostic, so the
+    # static config BACKBONE may not match the live @champion's architecture.
+    # Using BACKBONE here produced 2304-dim query embeddings against a 1024-dim
+    # kNN reference -> "X has 2304 features, but NearestNeighbors is expecting
+    # 1024". Reverse-map the champion's source_dev_model tag to its backbone.
+    from mlflow.tracking import MlflowClient
+    from dais26_dentex.config.champion import (
+        SOURCE_DEV_MODEL_TAG,
+        resolve_backbone_from_source_model,
+    )
+
+    _src = None
+    try:
+        _mv = MlflowClient(registry_uri="databricks-uc").get_model_version_by_alias(
+            name=CHAMPION_MODEL_NAME, alias="champion"
+        )
+        _src = (_mv.tags or {}).get(SOURCE_DEV_MODEL_TAG)
+    except Exception as e:
+        print(f"No resolvable @champion ({type(e).__name__}: {e}); falling back to BACKBONE={BACKBONE}")
+    EFFECTIVE_BACKBONE = resolve_backbone_from_source_model(
+        _src, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
+    )
+    print(f"Drift backbone = {EFFECTIVE_BACKBONE} (champion source_dev_model={_src}, config BACKBONE={BACKBONE})")
+
+    _device = "cuda" if torch.cuda.is_available() else "cpu"
+    backbone, info = load_backbone(name=EFFECTIVE_BACKBONE, revision=BACKBONE_REVISION,
+                                   cache_dir=CACHE_DIR, device=_device)
 
     # Reference from train embeddings (read from Delta)
     train_df = spark.table(TRAIN_EMBEDDINGS_TABLE).select("embedding").toPandas()
     ref_arr = np.stack(train_df["embedding"].apply(np.asarray).to_list()).astype(np.float32)
     ref = fit_reference(ref_arr, method="knn", k=DRIFT_KNN_K)
 
-    clean_emb = compute_embeddings(backbone, clean_bytes)
-    shifted_emb = compute_embeddings(backbone, shifted_bytes)
+    # Pass the SAME device the backbone was loaded on — compute_embeddings
+    # defaults to device="cuda", which raised "Found no NVIDIA driver" when the
+    # backbone was on CPU.
+    clean_emb = compute_embeddings(backbone, clean_bytes, device=_device)
+    shifted_emb = compute_embeddings(backbone, shifted_bytes, device=_device)
 
     clean_score = score_drift(clean_emb, ref)
     shifted_score = score_drift(shifted_emb, ref)

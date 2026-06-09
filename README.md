@@ -3,25 +3,30 @@
 **One frozen backbone, three jobs: detection head, drift sensor, embedding service.**
 
 Databricks-native showcase for the Data + AI Summit 2026 (June 15-18, San Francisco).
-Primary backbone: NVIDIA C-RADIOv4-SO400M (ungated, commercial-OK).
+Backbone is selectable in `notebooks/00_config.py` (`BACKBONE`): NVIDIA C-RADIOv4-SO400M
+(ungated, commercial-OK, `summary`/`spatial` dim 1152) or Meta DINOv3-ViTL16 (gated,
+comparison, dim 1024). DINOv2-base (dim 768) is the emergency fallback. All dimension-dependent
+code parameterizes on `BackboneInfo` — nothing downstream hardcodes a dimension.
 Dataset: DENTEX dental X-rays (CC-BY-NC-SA 4.0, research/demo only).
 Compute: Databricks AI Runtime (AIR) / Serverless GPU only — no traditional ML clusters anywhere.
 Training launch: notebook `@distributed` or `sgcli` (terminal). Both share one training core.
 Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 
 ![CI](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg)
-![DAB Validate](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg?job=dab-validate)
-![Weekly AIR Check](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/weekly_air_check.yml/badge.svg)
 
 ## What this repo demonstrates
 
 | Job | Backbone output used | Purpose |
 |-----|----------------------|---------|
-| `train_detector` | `spatial_features` (dim 1152) | FPN + RetinaNet detection head on DENTEX |
-| `precompute_embeddings` | `summary` (dim 1152) | Delta table + Mosaic AI Vector Search index |
-| `drift_monitor` | `summary` (dim 1152) | KNN-distance drift detection on detector traffic |
+| `train_detector` | `spatial_features` | FPN + RetinaNet detection head on DENTEX |
+| `precompute_embeddings` | `summary` | Delta table + Mosaic AI Vector Search index |
+| `drift_monitor` | `summary` | KNN-distance drift detection on detector traffic |
 
-One C-RADIOv4 artifact in UC Volume. Three downstream consumers. Zero backbone gradients.
+Feature dim is the backbone's `summary`/`spatial` dim (C-RADIOv4-SO400M: 1152, DINOv3-ViTL16: 1024)
+and flows from `BackboneInfo` — the Vector Search index dimension is even derived from the
+embeddings table at index-creation time, so switching `BACKBONE` needs no doc/code edits downstream.
+
+One frozen backbone artifact in a UC Volume. Three downstream consumers. Zero backbone gradients.
 
 ## Quick start
 
@@ -31,8 +36,8 @@ pip install uv && uv pip install -e ".[dev]"
 databricks auth login --host <DATABRICKS_HOST>
 uv build                                       # ships pyproject.toml inside the wheel for serving-deps lookup
 databricks bundle deploy -t dev               # deploys UC + jobs (NOT endpoints)
-databricks bundle run train_detector -t dev   # trains + @candidate + endpoint via SDK + @champion
-databricks bundle run precompute_embeddings -t dev
+databricks bundle run train_detector -t dev   # trains + @challenger + endpoint via SDK + @champion
+databricks bundle run deploy_champion_job -t prod     # embeddings/index/drift live in the prod (champion) schema
 ```
 
 Full 11-step sequence with smoke tests and prerequisites: [docs/README.md](docs/README.md)
@@ -87,14 +92,35 @@ Two phases — `bundle deploy` handles infrastructure; endpoints are SDK-driven.
 bundle deploy -t dev
   |-- UC catalog / schema / volumes / secret scope
   |-- MLflow experiment
-  |-- Job definitions (train_detector, precompute_embeddings, drift_monitor)
+  |-- Dev job definitions (train_detector, campaign_sweep, eval_comparison, eval_threshold_grid)
   `-- (NO serving endpoints)
 
+bundle deploy -t prod
+  |-- Champion schema (dais26_vfm_prod) + champion models + deployment job
+  `-- Prod-only embedding/monitoring jobs (precompute_embeddings, create_vector_search, drift_monitor)
+
 bundle run train_detector -t dev
-  setup --> train --> register @candidate --> deploy endpoint (SDK) --> smoke test --> @champion
+  setup --> train --> register @challenger --> deploy endpoint (SDK) --> smoke test --> @champion
 ```
 
-Endpoints are never created before a model version exists. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Endpoints are never created before a model version exists. The detector pyfunc is logged via
+**MLflow models-from-code** (`serve/detector_model_script.py`) with the package source bundled via
+`code_paths` — pickling the instance captured a `trust_remote_code` `transformers_modules.*`
+backbone reference the serving container cannot import. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+These standalone jobs let you re-run a single phase (or run the governed promotion path) without the full `train_detector` chain:
+
+| Job | Target | Notebook | Purpose |
+|-----|--------|----------|---------|
+| `deploy_endpoint` | dev + prod | `04_deploy_serving.py` | (Re)deploy `@challenger` → endpoint → smoke test → `@champion` |
+| `create_vector_search` | **prod** | `04b_create_vector_search.py` | Create VS endpoint + DELTA_SYNC index over the prod-schema embeddings table, sync, smoke-test query |
+| `precompute_embeddings` | **prod** | `03_precompute_embeddings.py` | Write the `summary`-embedding Delta table in the prod (champion) schema (prerequisite for `create_vector_search`) |
+| `deploy_job_detector` | dev + prod | `10`–`14` | **Primary** promotion path (MLflow 3 deployment job): eval on test → approval → cross-schema champion promote + deploy |
+| `connect_deployment_job` | dev + prod | `13_connect_deployment_job.py` | One-time wiring: set `deployment_job_id` on the dev detector models so a new `@challenger` auto-triggers `deploy_job_detector` |
+
+The embedding/monitoring subsystem (`precompute_embeddings`, `create_vector_search`,
+`drift_monitor`) is **prod-only**: its tables and VS index live in the champion
+schema (`dais26_vfm_prod`), so run those with `-t prod`.
 
 ## Repo structure
 
@@ -112,14 +138,14 @@ dais26-mlops-for-dl-on-air/
 |       |-- eval/           # coco_metrics.py
 |       |-- models/         # backbones (BackboneInfo), adapters (FPN), detection_head, builder, targets
 |       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
-|       |-- serve/          # detector_pyfunc.py, embedder_pyfunc.py, postprocess.py, endpoint_manager.py
+|       |-- serve/          # detector_pyfunc.py, detector_model_script.py (models-from-code loader), embedder_pyfunc.py, postprocess.py, endpoint_manager.py
 |       `-- train/          # trainer.py (Trainer class), losses, train_detector (thin shim), cli (sgcli entry)
-|-- notebooks/              # 00_config / 00_setup .. 07_latency_benchmark; widget-free, params via 00_config.py
+|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; widget-free, params via 00_config.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
 |-- sgcli/                  # Serverless GPU CLI workload (terminal launch path)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
 |-- tests/                  # unit/ and integration/ pytest suites
-`-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK
+`-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK, HPO
 ```
 
 ## Engineering anchors (Phase 4 hardening)
@@ -130,7 +156,8 @@ dais26-mlops-for-dl-on-air/
 | Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass; same instance feeds the notebook `@distributed` path and the sgcli/torchrun YAML. |
 | Distributed primitives | `distributed/primitives.py` + `distributed/barrier_dance.py` | `safe_barrier` surfaces dead-rank deadlocks as `BarrierTimeoutError` instead of hanging on NCCL. `rank0_first` is sequence-matched and avoids the cold-cache HF download race. |
 | HF env hardening | `platform/hf_env.py::configure_hf_env` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` (UC Volume FUSE rejects parallel chunked writes). |
-| Pyfunc serving deps | `pyproject.toml::[tool.dais26.serving-deps]` ↔ `platform/mlflow_io.py::serving_pip_requirements` | One edit to add a runtime dep; the wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` so the lookup works in AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. |
+| Pyfunc serving deps | `pyproject.toml::[tool.dais26.serving-deps]` ↔ `platform/mlflow_io.py::serving_pip_requirements` | One edit to add a runtime dep; the wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` so the lookup works in AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. `torch`/`torchvision` are pinned to the cu124 build (`2.6.0` / `0.21.0`) so GPU_SMALL (T4, driver CUDA 12.4) does not silently fall back to CPU. |
+| Pyfunc serving load path | `serve/detector_model_script.py` + `platform/mlflow_io.py::_default_code_paths` | Detector logged via **models-from-code** (script, not pickled instance) with the package bundled via `code_paths`. Avoids `ModuleNotFoundError: transformers_modules` (dynamic `trust_remote_code` class) and `ModuleNotFoundError: dais26_dentex` at serving. Backbone loads strictly offline (`local_files_only`) from the bundled HF cache; `torch.compile` is disabled at serving. |
 | MLflow API drift | `platform/mlflow_io.py::_log_model_artifact_kwarg` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature`. |
 | UC identifiers | `platform/uc.py::UCName`, `VolumePath` | Stop hand-rolling `f"{catalog}.{schema}.{name}"`; UC ident regex catches dotted-catalog typos. |
 | Notebook params | `notebooks/00_config.py` | All params live there; **no `dbutils.widgets`** and no DAB `base_parameters`. |
@@ -145,7 +172,7 @@ Full rationale (race traces, alternatives considered, follow-ups) in
 | Code in this repo | Apache-2.0 | See [LICENSE](LICENSE) |
 | DENTEX dataset | CC-BY-NC-SA 4.0 | Research and demo only. No commercial use. |
 | C-RADIOv4-SO400M weights | NVIDIA Open Model License | Commercial use permitted. Ungated on HuggingFace. |
-| DINOv3 weights | Custom `dinov3-license` (gated) | Comparison-only. Requires HF token approval. Not on default path. |
+| DINOv3 weights | Custom `dinov3-license` (gated) | Comparison backbone (`BACKBONE=dinov3_vitl16`). Requires HF token approval (`dais26-secrets/hf-token`). |
 
 **No trained model weights are stored in this repository.** Weights are downloaded at runtime and
 cached in a UC Volume by `scripts/pin_model_cache.py`.
@@ -158,6 +185,7 @@ cached in a UC Volume by `scripts/pin_model_cache.py`.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @candidate→@champion, Mosaic AI comparison |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Pre-demo D-1 checklist, rollback procedure, DINOv2 fallback, service principal creation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Latency and accuracy numbers (populated Phase 4) |
+| [docs/HPO.md](docs/HPO.md) | Detector HPO log: the push-to-0.60 mAP campaign, architectural fixes, and best-run record |
 | [docs/TALK.md](docs/TALK.md) | 45-minute talk outline with timing marks and slide-to-demo mapping |
 
 ## Developer commands

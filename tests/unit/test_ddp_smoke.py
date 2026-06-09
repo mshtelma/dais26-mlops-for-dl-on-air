@@ -18,7 +18,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.nn as nn
 
-from dais26_dentex.train.distributed_utils import (
+from dais26_dentex.distributed import (
     is_distributed,
     setup_distributed,
     teardown_distributed,

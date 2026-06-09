@@ -1,15 +1,9 @@
-"""MLflow pyfunc wrappers for the detection model.
+"""MLflow pyfunc wrapper for the detection model.
 
-Two classes are exported:
-
-* ``DetectorPyfunc`` — current (v2) consumer. Reads a single
-  ``manifest.json`` artifact (see ``config/manifest.py``).
-* ``DetectorPyfuncV1`` — v1 reader retained for one release so an
-  artifact logged before the v2 cut-over still loads. Will be removed
-  next minor.
-
-Both classes share the same ``predict`` shape so a v1 endpoint URL can
-be swapped to a re-trained v2 artifact without changing the caller.
+``DetectorPyfunc`` reads a single ``manifest.json`` artifact (see
+``config/manifest.py``) and is the only supported consumer. Artifacts
+logged before the manifest-v2 cut-over are no longer loadable — re-train
+with the current code to produce a v2 artifact.
 """
 
 from __future__ import annotations
@@ -25,18 +19,11 @@ import pandas as pd
 import torch
 from PIL import Image
 
-from dais26_dentex.config.constants import (
-    BACKBONE_CONFIG_FILE,
-    DETECTION_CONFIG_FILE,
-    LABEL_MAP_FILE,
-    MANIFEST_FILE,
-    MODEL_STATE_FILE,
-)
+from dais26_dentex.config.constants import MANIFEST_FILE
 from dais26_dentex.config.manifest import load_manifest
 from dais26_dentex.data.transforms import CLIP_MEAN as _CLIP_MEAN_SRC
 from dais26_dentex.data.transforms import CLIP_STD as _CLIP_STD_SRC
 from dais26_dentex.platform.hf_env import configure_hf_env
-from dais26_dentex.serve.postprocess import PostprocessConfig
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +44,25 @@ def _decode_b64_image(
     """
     raw = base64.b64decode(b64_str)
     img = Image.open(io.BytesIO(raw)).convert("RGB")
-    orig_size = (img.height, img.width)
-    img = img.resize((input_size, input_size))
-    arr = np.array(img, dtype=np.float32) / 255.0
+    orig_h, orig_w = img.height, img.width
+    # Letterbox to match training (`data.transforms._resize_and_pad`): longest-side
+    # resize preserving aspect ratio, then zero-pad the bottom-right to a square.
+    # The previous anisotropic `resize((input_size, input_size))` squash did NOT
+    # match the training pipeline and silently wrecked served mAP on non-square
+    # images (DENTEX panoramics are ~2:1) — the model saw a horizontally stretched
+    # image and boxes were mapped back with the wrong per-axis factors.
+    scale = input_size / max(orig_h, orig_w)
+    new_h = round(orig_h * scale)
+    new_w = round(orig_w * scale)
+    img = img.resize((new_w, new_h))  # PIL takes (width, height)
+    resized = np.array(img, dtype=np.float32) / 255.0  # (new_h, new_w, 3)
+    arr = np.zeros((input_size, input_size, 3), dtype=np.float32)
+    arr[:new_h, :new_w, :] = resized
     mean_a = np.array(mean, dtype=np.float32).reshape(3, 1, 1)
     std_a = np.array(std, dtype=np.float32).reshape(3, 1, 1)
     arr = arr.transpose(2, 0, 1)  # HWC → CHW
     arr = (arr - mean_a) / std_a
-    return torch.from_numpy(arr), orig_size
+    return torch.from_numpy(arr), (orig_h, orig_w)
 
 
 def _build_detection_model(
@@ -79,6 +77,12 @@ def _build_detection_model(
     nms_iou_threshold: float,
     score_threshold: float,
     max_detections: int,
+    local_files_only: bool = False,
+    anchor_layout: str = "absolute",
+    anchor_base_scale: float = 4.0,
+    anchor_octaves: list[float] | None = None,
+    nms_per_class: bool = False,
+    fusion_layers: list[int] | None = None,
 ) -> tuple[Any, Any]:
     """Build a `DetectionModel` and return ``(model, info)``.
 
@@ -86,6 +90,9 @@ def _build_detection_model(
     ``models.builder.build_detector``) because the trainer's builder
     expects a ``TrainerConfig`` shape and the pyfunc has artifact-shaped
     inputs instead.
+
+    ``local_files_only`` is set at serving time to force a strictly-offline
+    backbone load from the bundled HF cache (no egress in the serving box).
     """
     from dais26_dentex.models.backbones import load_backbone
     from dais26_dentex.models.detection_head import DetectionModel
@@ -95,6 +102,8 @@ def _build_detection_model(
         revision=backbone_revision,
         cache_dir=cache_dir,
         device=device,
+        local_files_only=local_files_only,
+        fusion_layers=fusion_layers,
     )
     model = DetectionModel(
         backbone=backbone,
@@ -106,31 +115,63 @@ def _build_detection_model(
         nms_iou_threshold=nms_iou_threshold,
         score_threshold=score_threshold,
         max_detections=max_detections,
+        anchor_layout=anchor_layout,
+        anchor_base_scale=anchor_base_scale,
+        anchor_octaves=anchor_octaves,
+        nms_per_class=nms_per_class,
     ).to(device)
     return model, info
 
 
-def _load_state_into(model: Any, state_path: str, device: str) -> None:
-    """Load the FPN+head state dict; backbone weights come from HF."""
+def _load_state_into(model: Any, state_path: str, device: str, *, keep_backbone: bool = False) -> None:
+    """Load the saved state dict into the model.
+
+    By default only FPN+head weights are restored and the backbone comes from
+    HF (frozen / merged-LoRA training). When ``keep_backbone`` is True (full or
+    partial backbone fine-tune) the persisted ``backbone.*`` weights are loaded
+    too — otherwise the served model would silently fall back to the pretrained
+    encoder and discard the fine-tune.
+    """
     state = torch.load(state_path, map_location=device, weights_only=True)
-    head_state = {k: v for k, v in state.items() if not k.startswith("backbone.")}
-    missing = model.load_state_dict(head_state, strict=False)
+    # The multi-layer fusion combiner lives under `backbone.fusion.*` but is a
+    # trainable head, not a pretrained encoder weight — always restore it, even
+    # when the rest of the backbone is re-fetched from HF (keep_backbone=False).
+    load_state = (
+        state
+        if keep_backbone
+        else {
+            k: v
+            for k, v in state.items()
+            if (not k.startswith("backbone.")) or k.startswith("backbone.fusion.")
+        }
+    )
+    missing = model.load_state_dict(load_state, strict=False)
     logger.info(
-        "Loaded head/FPN state. Missing: %s, Unexpected: %s",
+        "Loaded state (keep_backbone=%s). Missing: %s, Unexpected: %s",
+        keep_backbone,
         len(missing.missing_keys),
         len(missing.unexpected_keys),
     )
 
 
 def _maybe_compile(model: Any, device: str) -> Any:
-    """Best-effort `torch.compile` on GPU; no-op on CPU/exception."""
-    if device != "cuda":
-        return model
-    try:
-        return torch.compile(model, mode="reduce-overhead")
-    except Exception as e:
-        logger.warning("torch.compile failed (%s); continuing uncompiled", e)
-        return model
+    """Return the model uncompiled at serving time.
+
+    ``torch.compile`` is intentionally NOT applied here. The frozen HF
+    transformer backbones (``facebook/dinov3-vitl16``, ``nvidia/C-RADIOv4``)
+    run fine eagerly — training + validation forward them in eager mode — but
+    wrapping the full ``DetectionModel`` with ``torch.compile`` makes
+    TorchDynamo trace *into* the backbone at the first ``predict`` call. The
+    DINOv3 modeling stack routes through transformers' output-capturing
+    decorator (``transformers/utils/output_capturing.py``), whose module
+    namespace does not bind ``torch``; the Dynamo-transformed frame then raises
+    ``NameError: name 'torch' is not defined`` during inference (the model
+    still *loads* fine, since ``load_context`` runs eagerly). ``reduce-overhead``
+    (CUDA graphs) also needs static shapes, which the variable-size image input
+    path does not guarantee. The marginal latency win is not worth the serving
+    fragility, so we serve the eager module.
+    """
+    return model
 
 
 def _predict_batch(
@@ -156,11 +197,15 @@ def _predict_batch(
         boxes_t = out["boxes"][0].cpu()
         scores_t = out["scores"][0].cpu()
         labels_t = out["labels"][0].cpu()
-        sx = orig[1] / input_size
-        sy = orig[0] / input_size
-        scaled = boxes_t.clone()
-        scaled[:, [0, 2]] *= sx
-        scaled[:, [1, 3]] *= sy
+        # Invert the letterbox with a single uniform scale (NOT per-axis): the
+        # forward transform preserved aspect ratio and padded the bottom-right,
+        # so 1024px-frame boxes map back by `max(orig)/input_size`, then clip to
+        # the original image bounds.
+        orig_h, orig_w = orig
+        inv_scale = max(orig_h, orig_w) / input_size
+        scaled = boxes_t.clone() * inv_scale
+        scaled[:, [0, 2]] = scaled[:, [0, 2]].clamp(0, orig_w)
+        scaled[:, [1, 3]] = scaled[:, [1, 3]].clamp(0, orig_h)
         rows.append(
             {
                 "boxes": scaled.tolist(),
@@ -203,17 +248,27 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             raise FileNotFoundError(
                 f"Expected '{MANIFEST_FILE}' artifact (key 'manifest'); "
                 f"got keys: {sorted(artifacts.keys())}. "
-                f"For v1 artifacts use DetectorPyfuncV1."
+                f"Pre-manifest-v2 artifacts are no longer supported — re-train to produce a v2 artifact."
             )
         manifest_path = artifacts.get("manifest") or artifacts[MANIFEST_FILE.split(".")[0]]
         manifest = load_manifest(manifest_path)
 
         self.label_map: dict[int, str] = {int(k): v for k, v in manifest.label_map.items()}
         self.input_size: int = manifest.detector.input_size
+        # Normalise with the stats the model trained with (recorded in the
+        # manifest). Falls back to the BackboneSpec CLIP default for pre-v.next
+        # manifests. Using the wrong stats (e.g. CLIP for a DINOv3 model) feeds
+        # the encoder OOD inputs and silently tanks served mAP.
+        self.norm_mean: list[float] = list(manifest.backbone.image_mean)
+        self.norm_std: list[float] = list(manifest.backbone.image_std)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         cache_dir = artifacts.get("model_cache")
-        configure_hf_env(cache_dir)
+        # Serving bundles the HF cache as an artifact and the container has no
+        # egress — force a strictly-offline load so trust_remote_code does not
+        # try to reach huggingface.co (which fails model-server startup).
+        offline = cache_dir is not None
+        configure_hf_env(cache_dir, offline=offline)
 
         model, _info = _build_detection_model(
             backbone_name=manifest.backbone.name,
@@ -226,85 +281,17 @@ class DetectorPyfunc(mlflow.pyfunc.PythonModel):
             nms_iou_threshold=manifest.detector.nms_iou_threshold,
             score_threshold=manifest.detector.score_threshold,
             max_detections=manifest.detector.max_detections,
+            local_files_only=offline,
+            anchor_layout=manifest.detector.anchor_layout,
+            anchor_base_scale=manifest.detector.anchor_base_scale,
+            anchor_octaves=manifest.detector.anchor_octaves,
+            nms_per_class=manifest.detector.nms_per_class,
+            fusion_layers=manifest.backbone.fusion_layers,
         )
-        _load_state_into(model, artifacts["model_state"], device)
-        model.eval()
-        self.model = _maybe_compile(model, device)
-        self.device = device
-        # Stash for downstream callers that want to override at predict-time.
-        self.postprocess_cfg = PostprocessConfig(
-            score_threshold=manifest.detector.score_threshold,
-            nms_iou_threshold=manifest.detector.nms_iou_threshold,
-            max_detections=manifest.detector.max_detections,
-        )
-
-    def predict(
-        self,
-        context: mlflow.pyfunc.PythonModelContext,
-        model_input: pd.DataFrame,
-        params: dict[str, Any] | None = None,
-    ) -> pd.DataFrame:
-        return _predict_batch(
-            model=self.model,
-            device=self.device,
-            label_map=self.label_map,
-            input_size=self.input_size,
-            mean=self.CLIP_MEAN,
-            std=self.CLIP_STD,
-            model_input=model_input,
-        )
-
-
-# ----------------------------------------------------------------------
-# v1 (deprecated, kept one release)
-# ----------------------------------------------------------------------
-
-
-class DetectorPyfuncV1(mlflow.pyfunc.PythonModel):
-    """v1 reader — three-sidecar JSON layout (backbone_config /
-    detection_config / label_map).
-
-    Retained for one release so an artifact registered before the
-    manifest-v2 cut-over still loads. Re-train with the current code to
-    move to v2 (a typed manifest + one-file contract). Will be removed
-    in the next minor release.
-    """
-
-    DEFAULT_INPUT_SIZE: int = 1024
-    CLIP_MEAN: ClassVar[list[float]] = _CLIP_MEAN_SRC
-    CLIP_STD: ClassVar[list[float]] = _CLIP_STD_SRC
-
-    def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
-        import json
-
-        artifacts = context.artifacts
-        with open(artifacts[BACKBONE_CONFIG_FILE.split(".")[0]]) as f:
-            backbone_config = json.load(f)
-        with open(artifacts[DETECTION_CONFIG_FILE.split(".")[0]]) as f:
-            detection_config = json.load(f)
-        with open(artifacts[LABEL_MAP_FILE.split(".")[0]]) as f:
-            label_map = json.load(f)
-
-        self.label_map: dict[int, str] = {int(k): v for k, v in label_map.items()}
-        self.input_size = int(detection_config.get("input_size", self.DEFAULT_INPUT_SIZE))
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        cache_dir = artifacts.get("model_cache")
-        configure_hf_env(cache_dir)
-
-        model, _info = _build_detection_model(
-            backbone_name=backbone_config["name"],
-            backbone_revision=backbone_config.get("revision"),
-            cache_dir=cache_dir,
-            device=device,
-            num_classes=detection_config["num_classes"],
-            scales=detection_config["scales"],
-            aspect_ratios=detection_config["aspect_ratios"],
-            nms_iou_threshold=detection_config["nms_iou_threshold"],
-            score_threshold=detection_config["score_threshold"],
-            max_detections=detection_config["max_detections"],
-        )
-        _load_state_into(model, artifacts[MODEL_STATE_FILE.split(".")[0]], device)
+        # full/partial fine-tune persisted backbone weights in the state dict;
+        # restore them instead of keeping the pretrained HF encoder.
+        keep_backbone = manifest.backbone.trained_mode in ("full", "partial")
+        _load_state_into(model, artifacts["model_state"], device, keep_backbone=keep_backbone)
         model.eval()
         self.model = _maybe_compile(model, device)
         self.device = device
@@ -320,8 +307,8 @@ class DetectorPyfuncV1(mlflow.pyfunc.PythonModel):
             device=self.device,
             label_map=self.label_map,
             input_size=self.input_size,
-            mean=self.CLIP_MEAN,
-            std=self.CLIP_STD,
+            mean=self.norm_mean,
+            std=self.norm_std,
             model_input=model_input,
         )
 
@@ -355,6 +342,5 @@ def build_signature_and_example() -> tuple[Any, pd.DataFrame]:
 
 __all__ = [
     "DetectorPyfunc",
-    "DetectorPyfuncV1",
     "build_signature_and_example",
 ]

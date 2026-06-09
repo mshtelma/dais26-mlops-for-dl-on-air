@@ -46,15 +46,54 @@ Target: full 10-epoch frozen training completes in ≤20 minutes on a single H10
 
 Target: frozen-backbone [email protected] on DENTEX val set ≥ 0.45.
 
+Per-class AP@50 is produced by `eval.coco_metrics.evaluate_coco` (`per_class_AP50`)
+and surfaced by `notebooks/09_eval_comparison.py` / `09b_eval_threshold_grid.py`.
+The shared scoring path now lives in `dais26_dentex.eval.runner.score_model_on_split`
+(used by both `09` and the deployment-job eval task `notebooks/10_deploy_eval_task.py`),
+so the comparison notebook and the promotion gate score identically.
+The "push to 0.60" campaign rows track the per-level + resolution/schedule/anchor/
+augmentation tuning (see [HPO.md](HPO.md#push-to-060--two-sequential-single-model-campaigns)).
+
+**val = selection surface, test = published surface.** `val` (50 imgs) is what the
+trainer validates on and what the HPO sweep selects + sets `@challenger` from (the
+challenger registration gate compares `val/best_mAP_50` against the experiment's prior
+best). `test` (250 imgs) is the larger held-out generalization surface; the
+deployment-job eval task re-scores the `@challenger` version on **test** and gates
+promotion on it (`mAP@50 ≥ 0.58 AND Caries AP@50 ≥ 0.30` AND best-in-experiment vs the
+current prod `@champion` + prior evaluated versions). Both splits are held out of
+training, so report the `test` row as the published number and the `val` row as the
+selection number. `notebooks/09` now loops over **both** `["val", "test"]`.
+
+> **Metric caveat.** All numbers here are flat **COCO mAP@50** over our 4 collapsed
+> classes (Caries, Deep Caries, Periapical Lesion, Impacted) via pycocotools — NOT the
+> DENTEX challenge's hierarchical (quadrant → enumeration → diagnosis) leaderboard
+> metric. They are not directly comparable to the official challenge ranking.
+
 | Model | Backbone | mAP@50 | mAP@50:95 | Caries AP@50 | Deep Caries AP@50 | Periapical AP@50 | Impacted AP@50 |
 |-------|----------|--------|-----------|-------------|------------------|-----------------|---------------|
 | Frozen head | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
 | LoRA rank=8 (STRETCH) | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
+| Per-level (baseline) | C-RADIOv4-SO400M | 0.5219 | TBD | 0.2102 (09b) | TBD | TBD | TBD |
+| Per-level (baseline) | DINOv3-ViTL16 | 0.5181 | 0.285 | TBD (broken reg.) | TBD | TBD | TBD |
+| Campaign best (`dazzling-mole-850`, 150ep) | C-RADIOv4-SO400M | 0.5931 | 0.304 | pending (09) | TBD | TBD | TBD |
+| Campaign best (`capricious-hound-240` v7, fusion×150ep) | DINOv3-ViTL16 | 0.5738 | 0.333 | pending (09) | TBD | TBD | TBD |
+| Campaign candidate (`resilient-moth-415` v11, `@candidate`) | C-RADIOv4-SO400M | 0.5697 | 0.288 | pending (09) | TBD | TBD | TBD |
+| Campaign candidate (`rebellious-gnu-395` v8, `@candidate`) | DINOv3-ViTL16 | 0.5704 | 0.340 | pending (09) | TBD | TBD | TBD |
+| **test split (published)** `@challenger` | C-RADIOv4-SO400M | TBD | TBD | TBD | TBD | TBD | TBD |
+| **test split (published)** `@challenger` | DINOv3-ViTL16 | TBD | TBD | TBD | TBD | TBD | TBD |
+
+(Rows above the divider are `val`-split selection numbers; the two `test split
+(published)` rows are the deployment-job eval-task numbers re-scored on the 250-image
+test split — fill from notebook 10's logged `test/mAP_50` / `test/AP50_*` metrics.)
 
 Acceptance thresholds:
 - mAP@50 ≥ 0.45 (frozen, MUST-SHIP)
 - mAP@50 ≥ 0.55 (LoRA, STRETCH)
 - Caries AP@50 ≥ 0.30 (anchor calibration validation, per C5b protocol)
+- **mAP@50 ≥ 0.58 AND Caries AP@50 ≥ 0.30 — per-backbone gate for the 0.60 campaign**
+  (the deployment-job eval task `notebooks/10` enforces this on the **test** split for
+  the dev `<backbone>_detector@challenger` version, PLUS a best-in-experiment check
+  vs the prod `@champion` and prior versions, before approval/promotion; target 0.60)
 
 ---
 

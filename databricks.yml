@@ -4,7 +4,7 @@ bundle:
 variables:
   sp_app_id:
     description: "Service principal application ID (UUID) for prod run_as. Created via 'databricks service-principals create --display-name dais26-vfm-sp'. Required for prod target."
-    default: ""
+    default: "b3791f25-4356-4a6d-916a-91bbeebd950d"
 
 artifacts:
   dais26_vfm_wheel:
@@ -15,6 +15,7 @@ artifacts:
 include:
   - "resources/jobs/*.yml"
   - "resources/experiments/*.yml"
+  - "resources/registered_models/*.yml"
   # NOTE: resources/serving/*.yml is intentionally NOT included.
   # Serving endpoints are deployed via SDK in the deploy_endpoint task after training,
   # gated on @candidate alias being set on a registered model version.
@@ -37,3 +38,32 @@ targets:
     mode: production
     run_as:
       service_principal_name: "${var.sp_app_id}"
+    # Grant the prod run_as SP manage access to everything the bundle deploys
+    # (workspace files + jobs). Required when a human deploys prod but the jobs
+    # run_as the SP: without this the SP can't read the deployed notebooks. When
+    # the SP itself deploys (CI/M2M) it already owns these, so this is a no-op.
+    permissions:
+      - service_principal_name: "${var.sp_app_id}"
+        level: CAN_MANAGE
+      - user_name: "puneet.jain@databricks.com"
+        level: CAN_MANAGE
+    # Prod-only: manage the champion schema declaratively. Scoped to prod (not a
+    # global `include`) on purpose — in dev mode DABs would prefix the schema name
+    # (`dev_<user>_dais26_vfm_prod`) and clash with the literal path hardcoded in
+    # notebooks/00_config.py. Prod mode applies no prefix, so it resolves to the
+    # literal `dais26_vfm_prod`. On an already-provisioned workspace where the
+    # schema exists outside Terraform state, bind it once before deploying:
+    #   databricks bundle deployment bind dais26_vfm_prod \
+    #     mlops_pj.dais26_vfm_prod -t prod --profile <profile> --auto-approve
+    # (pass --profile if multiple ~/.databrickscfg profiles match the host).
+    # (otherwise `bundle deploy` errors that the schema already exists). The dev
+    # schema is intentionally NOT managed here — it is shared, data-laden infra.
+    resources:
+      schemas:
+        dais26_vfm_prod:
+          catalog_name: mlops_pj
+          name: dais26_vfm_prod
+          comment: "PROD champion detectors: lineage-preserving copies of approved dev versions, alias @champion."
+      # The champion registered model is defined prod-only in
+      # resources/registered_models/detector_models_champion.yml and references the
+      # dais26_vfm_prod schema resource above for create-ordering.

@@ -49,6 +49,23 @@ def test_encode_decode_inverse() -> None:
     assert torch.allclose(decoded, gt_boxes, atol=1e-4)
 
 
+def test_encode_clamps_size_delta_to_decode_bound() -> None:
+    """A large gt vs a small anchor would need dw/dh > the decode clamp; the
+    encoder must clamp the target so it stays reachable (encode/decode symmetry)."""
+    from dais26_dentex.models.detection_head import BOX_DELTA_LOG_CLAMP, decode_boxes
+
+    # 1000px gt, 10px anchor -> raw log(1000/10) = log(100) ~ 4.6 > clamp 4.0.
+    anchors = torch.tensor([[0.0, 0.0, 10.0, 10.0]])
+    gt_boxes = torch.tensor([[0.0, 0.0, 1000.0, 1000.0]])
+    deltas = encode_boxes_xyxy_to_deltas(gt_boxes, anchors)
+    assert torch.all(deltas[:, 2:] <= BOX_DELTA_LOG_CLAMP + 1e-6)
+    # Decoding the clamped target must not blow past what decode can produce:
+    # encode then decode is a no-op at the clamp boundary (both saturate at 4.0).
+    decoded = decode_boxes(deltas, anchors)
+    redeltas = encode_boxes_xyxy_to_deltas(decoded, anchors)
+    assert torch.allclose(deltas, redeltas, atol=1e-4)
+
+
 def test_match_anchors_no_gt() -> None:
     anchors = torch.zeros(10, 4)
     gt_boxes = torch.zeros(0, 4)

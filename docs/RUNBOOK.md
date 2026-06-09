@@ -95,10 +95,127 @@ Run this checklist the day before the talk (Sunday June 14). Estimated time: 45 
 
 ---
 
+## Deployment job (primary promotion path)
+
+Two MLflow 3 deployment jobs — `deploy_job_detector` (challenger side,
+`resources/jobs/deploy_job_detector.yml`) and `deploy_champion_job` (champion side,
+`resources/jobs/deploy_champion_job.yml`) — are the primary path from a trained model to a
+served champion. The standalone `deploy_endpoint` job (notebook `04_deploy_serving.py`) is
+now the break-glass / manual redeploy path only.
+
+### Dev / prod asset split (two schemas)
+
+Following the Big Book "deploy code" pattern, dev and prod registered models live in
+separate UC schemas (`notebooks/00_config.py`):
+
+- **Dev** — `CATALOG.SCHEMA` (`mlops_pj.dais26_vfm`). Training / the HPO sweep register
+  new versions here under backbone-keyed names (`cradio_detector`, `dinov3_detector`) and
+  set the dev alias `@challenger` (constant `ALIAS_CANDIDATE`, value `challenger`).
+- **Prod / champion** — a **single, backbone-agnostic** model `detector_champion` in
+  `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`), served from a single
+  endpoint `dais26-detector-champion`. Both dev backbones funnel into this one model:
+  RegisterChampion copies the approved dev winner of any architecture here (lineage
+  preserved; tags `source_dev_model`) and sets the staging alias `@champion_candidate`.
+  Creating that new champion **version** auto-triggers the prod champion job
+  (`deploy_champion_job`), which deploys it and flips `@champion`. Broad deployment is
+  therefore from one schema/model — never two competing architecture-named champions.
+  `notebooks/00_setup.py` creates this schema + the SP grants.
+
+### How a release flows (two deployment jobs, version-triggered)
+
+Promotion is split across **two** MLflow 3 deployment jobs, each connected (via
+`deployment_job_id`) to the model whose new versions should trigger it:
+
+- **`deploy_job_detector` (challenger side, dev)** — connected to the dev detector models.
+  A new `@challenger` version triggers Evaluation → Approval → RegisterChampion.
+- **`deploy_champion_job` (champion side, prod)** — connected to `detector_champion`. The
+  new champion version that RegisterChampion creates triggers deploy + smoke-test +
+  `@champion` flip → embeddings → Vector Search → drift.
+
+The hand-off between them is the cross-schema copy: RegisterChampion creating a new
+`detector_champion` version is exactly the event that triggers the champion job. The
+champion job only sets aliases + deploys (it never creates new `detector_champion`
+versions), so there is no trigger loop.
+
+1. **Trigger.** The HPO sweep (`02b`) sets `@challenger` on a dev detector model **only
+   when** the retrained winner's `val/best_mAP_50` strictly beats the experiment's prior
+   best (the challenger registration gate, pure `sweep.beats_experiment_best`). A new
+   `@challenger` version auto-triggers `deploy_job_detector` (wired by
+   `connect_deployment_job` / `notebooks/13` on `-t dev`, which calls
+   `update_registered_model(deployment_job_id=...)` for both dev detectors).
+2. **Evaluation** (`notebooks/10`, GPU `GPU_1xA10` / `databricks_ai_v5`): re-scores the
+   triggered version on the DENTEX **val** split via the shared `eval.runner`, logs
+   `val/*` metrics to the model version, and gates on the challenger beating the
+   registered `@champion` (re-scored on the same val split) on **≥ 2 of 3** metrics
+   (`mAP_50`, `mAP_75`, `mAP_50_95`). If there is no `@champion` yet, the challenger
+   auto-passes. (The DENTEX 250-image test set ships images only — no public annotations
+   — so promotion is gated on the labeled 50-image val split, not test.)
+3. **Approval_Check** (`notebooks/11`, CPU, no retries): passes only when the UC tag
+   `Approval_Check = Approved` is set on the version. The task name starts with
+   `approval`, so Databricks treats it as the deployment-job approval gate and shows an
+   **Approve** button on the model version page; clicking it auto-repairs the run and
+   writes the tag whose **key == the task name** (`Approval_Check`) with value
+   `Approved`. (Task name and the tag the notebook checks must stay in sync.) To approve,
+   click **Approve** on the model version page, or set the tag manually and repair-run:
+   ```python
+   from mlflow.tracking import MlflowClient
+   c = MlflowClient(registry_uri="databricks-uc")
+   c.set_model_version_tag(name=MODEL_NAME, version=MODEL_VERSION,
+                           key="Approval_Check", value="Approved")
+   ```
+   then repair-run the Approval_Check task.
+4. **RegisterChampion** (`notebooks/12`, CPU): `copy_model_version` from dev →
+   `CHAMPION_CATALOG.CHAMPION_SCHEMA` (lineage to the source run preserved), then
+   `set_registered_model_alias(..., "champion_candidate", <new prod version>)`. This task
+   does **not** deploy the endpoint or touch `@champion`. The copy creates a new
+   `detector_champion` version → **triggers `deploy_champion_job`** (steps 5–6); the
+   `@champion_candidate` alias tells that job which version to deploy.
+5. **deploy_champion** (`notebooks/14`, CPU, first task of `deploy_champion_job`):
+   `deploy_and_smoke_test(..., candidate_alias="champion_candidate", promote_on_success=True)`
+   resolves the candidate version, deploys/updates the endpoint, smoke-tests it, and flips
+   `@champion` **only** on a passing smoke test. On failure `@champion` is left untouched
+   (previous champion keeps serving). `@champion` always means "verified, live-serving".
+6. **Downstream refresh** (chained after deploy, in `deploy_champion_job`):
+   `precompute_embeddings` (`notebooks/03`, GPU) → `create_vector_search` (`notebooks/04b`,
+   CPU) → `drift_baseline` (`notebooks/05`, CPU) rebuild the reference embeddings, the
+   Vector Search index, and the drift baseline for the new champion. The standalone
+   `precompute_embeddings` / `create_vector_search` jobs were folded into the champion job;
+   `drift_monitor` stays as a separate paused cron for ongoing scheduled monitoring.
+
+> **Why a model-version trigger (not `MODEL_ALIAS_SET`)?** The champion side was originally
+> designed as a separate prod job triggered by `MODEL_ALIAS_SET` on `@champion_candidate`.
+> Job model/alias triggers are in Private Preview and **not supported by the `databricks`
+> Terraform provider** (1.115.0, pinned by the CLI), so `bundle deploy` cannot apply that
+> trigger. The model-**version** deployment trigger (set via `deployment_job_id` on the
+> registered model) **is** GA and provider-supported, so the champion job is connected to
+> `detector_champion` and fires on the RegisterChampion copy instead. Revisit alias triggers
+> once provider support lands.
+
+### One-time wiring after deploy
+
+`connect_deployment_job` (`notebooks/13`) is **target-aware**:
+
+```bash
+# dev: connect deploy_job_detector -> dev detector models (cradio_detector, dinov3_detector)
+databricks bundle deploy -t dev
+databricks bundle run connect_deployment_job -t dev
+
+# prod: connect deploy_champion_job -> detector_champion
+databricks bundle deploy -t prod
+databricks bundle run connect_deployment_job -t prod
+```
+
+`scripts/deploy_bundle.sh -t <target>` runs both steps for you. Re-run
+`connect_deployment_job` if a deployment job is ever recreated (its id changes).
+
+---
+
 ## Rollback procedure
 
 Use this when a newly promoted `@champion` version is producing bad results and you need to revert
-to the previous version.
+to the previous version. (`@champion` now lives on the **prod** model
+`mlops_pj.dais26_vfm_prod.<backbone>_detector`; the examples below use the dev-schema
+names but apply the same way to the prod champion model.)
 
 ### Step 1 — Find the previous champion version
 
@@ -203,12 +320,24 @@ Loading pre-baked checkpoint. Skipping training.
 
 ### Step 2 — Recompute embeddings at dim=768
 
+`precompute_embeddings` is no longer a standalone job — it is a task in the prod
+`deploy_champion_job` (chained after `deploy_champion`). **It self-selects the backbone
+from the live champion**: it reads the `source_dev_model` tag off the `@champion` version
+and reverse-maps it to the architecture (falling back to `BACKBONE` in `00_config` only
+when there is no champion yet), so the embeddings always match whatever architecture is
+serving — no `backbone` param needed. The embeddings (and the VS index + drift baseline)
+refresh automatically on every promotion. To refresh them ad hoc for the current champion,
+run the champion job (optionally just that task):
+
 ```bash
-databricks bundle run precompute_embeddings -t dev \
-  --params backbone=dinov2_base
+# re-run the whole champion job (deploy → embeddings → VS → drift):
+databricks bundle run deploy_champion_job -t prod
+# or run just the embeddings notebook task:
+databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 ```
 
-This rewrites `ml_dev.dais26_vfm.train_embeddings` with 768-dim `ARRAY<FLOAT>` vectors.
+This rewrites `train_embeddings` with the champion backbone's `ARRAY<FLOAT>` vectors
+(dim follows the architecture: C-RADIOv4=1152, DINOv3=1024, DINOv2=768).
 
 ### Step 3 — Recreate the Vector Search index with `embedding_dimension=768`
 
@@ -256,7 +385,7 @@ The drift monitor reads `backbone_info.summary_dim` from `BackboneInfo` automati
 beyond running the monitor once with the new backbone parameter:
 
 ```bash
-databricks bundle run drift_monitor -t dev \
+databricks bundle run drift_monitor -t prod \
   --params backbone=dinov2_base
 ```
 
@@ -362,9 +491,19 @@ GRANT MODIFY, SELECT ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
 GRANT READ VOLUME, WRITE VOLUME ON VOLUME ml.dais26_vfm.dentex_raw TO \`$SP_APP_ID\`;
 GRANT READ VOLUME, WRITE VOLUME ON VOLUME ml.dais26_vfm.model_cache TO \`$SP_APP_ID\`;
 GRANT CREATE MODEL ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
+GRANT APPLY TAG ON SCHEMA ml.dais26_vfm TO \`$SP_APP_ID\`;
 GRANT EXECUTE ON MODEL ml.dais26_vfm.cradio_detector TO \`$SP_APP_ID\`;
+-- Prod / champion schema (deployment-job promote target): the SP copies the
+-- approved dev version here and sets @champion, so it needs USE/CREATE MODEL/
+-- APPLY TAG on the prod schema and EXECUTE on the dev models (copy source).
+GRANT USE CATALOG ON CATALOG ml TO \`$SP_APP_ID\`;
+GRANT USE SCHEMA, CREATE MODEL, APPLY TAG ON SCHEMA ml.dais26_vfm_prod TO \`$SP_APP_ID\`;
 "
 ```
+
+> These grants are applied automatically by `notebooks/00_setup.py` (which uses the
+> `CHAMPION_CATALOG.CHAMPION_SCHEMA` config values); the SQL above is the manual
+> equivalent for reference.
 
 ### Step 4 — Grant inference table access (deferred)
 
@@ -391,6 +530,81 @@ Options:
    application ID displayed there.
 
 The `applicationId` used in DAB `run_as` must match the Entra App ID, not the Databricks internal ID.
+
+### CI/CD via OAuth M2M (service principal client id + secret) {#cicd-oauth-m2m}
+
+The deploy workflow authenticates to Databricks via **OAuth machine-to-machine
+(M2M)** using the SP's client id + an OAuth secret. The secret mints short-lived
+OAuth tokens (no long-lived PAT). This path needs only **SP-create + OAuth-secret**
+rights — **no account admin / workload-identity-federation policy** (that route is
+account-admin-only; use it instead if you have account-admin access).
+
+- `.github/workflows/deploy.yml` — deploys the bundle + runs `connect_deployment_job`
+  (environments `dev`/`prod`).
+
+> `databricks bundle validate` is **not** run in CI: the workspace enforces an IP
+> access list that blocks GitHub-hosted runner IPs (403). Run it locally before
+> pushing (`databricks bundle validate -t dev`), or move it to a self-hosted runner
+> inside the allowed network.
+>
+> **Interim deploy** (until CI can reach the workspace): `deploy.yml` is also
+> blocked by the same IP ACL, so deploy from a machine inside the allowed network
+> with `./scripts/deploy_bundle.sh -t dev` (or `-t prod`). It idempotently ensures
+> the UC schemas exist (`mlops_pj.dais26_vfm`, `mlops_pj.dais26_vfm_prod`), then
+> runs `bundle deploy` + `bundle run connect_deployment_job` — the manual
+> equivalent of the workflow.
+>
+> Schema management is split:
+> - **`dais26_vfm` (dev)** is shared, data-laden infra and is **never** bundle-
+>   managed (dev mode would prefix it to `dev_<user>_dais26_vfm`, and `bundle
+>   destroy` could drop it). The script always ensures it exists.
+> - **`dais26_vfm_prod` (champion)** is **Terraform-managed in the `prod` target
+>   only** (`databricks.yml` → `targets.prod.resources.schemas`); the champion
+>   registered models reference it so Terraform creates the schema first. The
+>   script pre-creates it only for the **dev** target (dev needs it but doesn't
+>   manage it). For `prod` on a workspace where it already exists, bind it once:
+>   `databricks bundle deployment bind dais26_vfm_prod mlops_pj.dais26_vfm_prod -t prod --profile <profile> --auto-approve`
+>   (pass `--profile` if multiple `~/.databrickscfg` profiles match the host). This
+>   has already been done on the current workspace.
+>
+> Keep the script's `SCHEMAS` list and the prod schema resource in sync with
+> `notebooks/00_config.py`.
+
+One-time setup:
+
+1. **Generate an OAuth secret on the SP.** Either the UI (Settings → Identity and
+   access → Service principals → `dais26-vfm-sp` → Secrets → Generate secret) or the
+   CLI:
+
+   ```bash
+   # SP_NUMERIC_ID is the SP's Databricks id (not the application UUID).
+   databricks service-principal-secrets create <SP_NUMERIC_ID>
+   # → returns { "secret": "dose...", "secret_hash": "..." }  — copy `secret` now;
+   #   it is shown only once.
+   ```
+
+   The SP **application UUID** is the value for `DATABRICKS_CLIENT_ID`; the returned
+   `secret` is `DATABRICKS_CLIENT_SECRET`.
+
+2. **Create the `dev`, `prod`, and `ci` GitHub Environments** (repo Settings →
+   Environments). Add a **required reviewer** on `prod` to gate production deploys;
+   leave `dev` and `ci` without reviewers (they run unattended / on a schedule).
+   Per environment, set:
+   - **Variable** `DATABRICKS_HOST` — the workspace URL for that environment.
+   - **Variable** `DATABRICKS_CLIENT_ID` — the SP application UUID (also reused for
+     `sp_app_id` in `run_as`; the workflow passes it through automatically).
+   - **Secret** `DATABRICKS_CLIENT_SECRET` — the OAuth secret from step 1.
+
+3. The workflows set `DATABRICKS_AUTH_TYPE: oauth-m2m`; the Databricks CLI exchanges
+   the client id + secret for short-lived OAuth tokens. Trigger manually (choose the
+   target) or let a push to `main` auto-deploy `dev`.
+
+> Rotate the OAuth secret periodically: generate a new one (an SP can hold multiple),
+> update `DATABRICKS_CLIENT_SECRET` in each environment, then delete the old secret
+> with `databricks service-principal-secrets delete <SP_NUMERIC_ID> <SECRET_ID>`.
+> If you later obtain account-admin access, prefer migrating to OIDC token federation
+> (secret-free) — the workflows only need `DATABRICKS_AUTH_TYPE` flipped to
+> `github-oidc` + `permissions: id-token: write`.
 
 ---
 
@@ -582,6 +796,71 @@ minor versions is detected once at import via `inspect.signature` rather than
 paid per-call as a `try/except TypeError`. See `_log_model_artifact_kwarg()`
 in the same module.
 
+### Models-from-code serving load path {#models-from-code}
+
+**Symptom 1 — `ModuleNotFoundError: transformers_modules`.** The endpoint
+deploy fails at model-server startup ("model server failed to load"). The
+detector was logged by pickling a `DetectorPyfunc()` instance in the training
+process; that pickle captured a reference to the HuggingFace *dynamic* backbone
+class. `trust_remote_code=True` (nvidia/C-RADIOv4-SO400M, facebook/dinov3-vitl16)
+generates that class at runtime inside the `transformers_modules.*` package,
+which does not exist in the serving container — so unpickling `python_model.pkl`
+raises `ModuleNotFoundError: No module named 'transformers_modules'`.
+
+**Symptom 2 — `ModuleNotFoundError: dais26_dentex`.** The pyfunc class lives in
+a locally-installed package (not on PyPI). MLflow cannot pin it in
+`requirements.txt`, so the serving container can't import the model class.
+
+**Fix.** Log the detector via **models-from-code** *and* bundle the package source:
+
+```python
+reporter.log_pyfunc(
+    python_model=".../serve/detector_model_script.py",  # a SCRIPT, not an instance
+    code_paths=[<dir of installed dais26_dentex>],       # default in log_pyfunc
+    ...
+)
+```
+
+`detector_model_script.py` is a 3-line module whose body is
+`set_model(DetectorPyfunc())`. MLflow stores the script as the model definition
+and re-executes it at load time (building a fresh `DetectorPyfunc`), so no
+HF dynamic class is ever serialized. `code_paths` copies the package into the
+model's `code/` dir and MLflow prepends it to `sys.path` at load — `import
+dais26_dentex` then works with no pip install. The trainer wires both at the
+single `_save_and_register` log site (`train/trainer.py`); there is no separate
+re-log step.
+
+**Offline backbone load.** The serving container has no egress. `load_context`
+forces `local_files_only=True` and the offline HF env (`HF_HUB_OFFLINE`) and
+reads the backbone from the `model_cache` artifact bundled with the model.
+Without this, `from_pretrained` tries to reach huggingface.co and the model
+server fails to start.
+
+**No `torch.compile` at serving.** `_maybe_compile` is a no-op. Wrapping the
+full `DetectionModel` makes TorchDynamo trace *into* the backbone on the first
+`predict`; the DINOv3 stack routes through transformers'
+`output_capturing.py`, whose module namespace does not bind `torch`, so the
+Dynamo-transformed frame raises `NameError: name 'torch' is not defined` during
+inference (the model still *loads* fine — `load_context` runs eagerly). CUDA
+graphs (`reduce-overhead`) also need static shapes the variable-size image path
+can't guarantee. The marginal latency win isn't worth the serving fragility.
+
+### torch/torchvision cu124 pin {#torch-cu124-pin}
+
+**Symptom.** The detector endpoint deploys and serves, but inference is slow and
+the GPU dashboard shows ~0% GPU utilization — the model silently ran on CPU.
+`torch.cuda.is_available()` returns `False` inside the container.
+
+**Cause.** GPU_SMALL serving nodes (NVIDIA T4) ship a driver that reports CUDA
+12.4. An unpinned `torch` in `[tool.dais26.serving-deps]` resolves to the newest
+PyPI wheel (cu126/cu128), whose CUDA runtime the 12.4 driver cannot initialize —
+torch falls back to CPU instead of erroring.
+
+**Fix.** Pin `torch==2.6.0` and `torchvision==0.21.0` in
+`[tool.dais26.serving-deps].detector`; those versions default to the cu124 build
+on PyPI and initialize cleanly on the 12.4 driver. Re-validate with
+`scripts/probe_endpoint_gpu.py` if you bump the versions.
+
 ### sgcli launch troubleshooting {#sgcli-launch}
 
 The terminal launch path (`sgcli/workload_train_detector.yaml`) snapshots
@@ -596,3 +875,31 @@ dispatches to `Trainer.run()`. Common failures:
 | `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `sgcli`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
 | Hyperparameters from yaml ignored | yaml top-level shape mismatch | The sgcli yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
 | `experiment_name` from yaml clashes with `EXPERIMENT_NAME` from `notebooks/00_config.py` | Both surfaces define their own naming — intentional | Keep them independent; they target different runs (sgcli vs. notebook) |
+
+### Hyperparameter sweep + backbone fine-tuning {#hpo-sweep}
+
+The `campaign_sweep` job (`notebooks/02b_hpo_sweep.py`) tunes the detector head and
+fine-tunes the C-RADIO / DINOv3 backbone. It is config-driven from the `SWEEP_*`
+block in `notebooks/00_config.py` and shares the `Trainer` core with the single-run
+path, so anything below applies to both `train_detector` and `campaign_sweep`. It is
+the single sweep driver (parametrized by `sweep_stage`); the former `hpo_sweep` job
+has been folded into it, and a trailing `confirm_challenger` task asserts the
+best-in-experiment gate set the `@challenger` alias.
+
+Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in
+`SWEEP_SEARCH_SPACE`, the sgcli yaml, or `00_config.py`):
+
+| Knob | Values | Effect |
+|------|--------|--------|
+| `backbone_mode` | `frozen` (default) / `lora` / `partial` / `full` | how much of the encoder receives gradients; resolved via `cfg.effective_backbone_mode()` (legacy `use_lora=True` still maps to `lora`) |
+| `backbone_trainable_blocks` | int ≥ 1 | for `partial`: how many trailing transformer blocks `peft.unfreeze_last_blocks` unfreezes |
+| `backbone_lr` | float > 0 | discriminative LR for the backbone param group (head/FPN keep `lr`); both feed a multi-`max_lr` `OneCycleLR` |
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Sweep / fine-tune run OOMs on the H100 pool | `backbone_mode=full` doubles activations vs frozen | Drop to `partial` with a small `backbone_trainable_blocks`, or lower `batch_size` in the trial space |
+| Loss diverges immediately when fine-tuning the backbone | `backbone_lr` too high → catastrophic forgetting of the VFM | Keep `backbone_lr` ≈ 1e-5 (10–100× below the head `lr`); the discriminative param groups exist for exactly this |
+| DDP `find_unused_parameters` error | `backbone_mode=full` expects every param to get a grad | Trainer sets `find_unused_parameters=False` only for `full`; for `frozen`/`lora`/`partial` it stays `True` |
+| Fine-tuned weights don't survive serving | backbone weights stripped at load for frozen/LoRA artifacts | The manifest records `backbone.trained_mode`; `detector_pyfunc` keeps the full backbone state only when it is `full`/`partial`. Re-train so the manifest is written by current code |
+| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `campaign_sweep` carries a 48-hour timeout (`timeout_seconds: 172800`); `train_detector` an 8-hour one; sgcli workloads use `timeout_minutes: 480` |
+| Anchor changes have no effect | `anchor_scales`/`aspect_ratios` left unset | `build_detector` only overrides the FPN defaults when both are set; the sweep's `anchor_mode` maps presets onto these fields |

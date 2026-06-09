@@ -12,16 +12,25 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 
-def _load_image_tensor(path: str, size: int = 224) -> torch.Tensor:
-    """Load image, resize, normalize with CLIP stats, return (3, size, size) tensor."""
+def _load_image_tensor(
+    path: str,
+    size: int = 224,
+    mean: list[float] | None = None,
+    std: list[float] | None = None,
+) -> torch.Tensor:
+    """Load image, resize, normalize, return (3, size, size) tensor.
+
+    ``mean``/``std`` default to CLIP stats; pass the backbone's
+    ``BackboneInfo.image_mean/std`` so DINOv2/v3 embeddings use ImageNet norm.
+    """
     from dais26_dentex.data.transforms import CLIP_MEAN, CLIP_STD
 
     img = Image.open(path).convert("RGB").resize((size, size))
     arr = np.array(img, dtype=np.float32) / 255.0
-    mean = np.array(CLIP_MEAN, dtype=np.float32).reshape(3, 1, 1)
-    std = np.array(CLIP_STD, dtype=np.float32).reshape(3, 1, 1)
+    mean_a = np.array(mean if mean is not None else CLIP_MEAN, dtype=np.float32).reshape(3, 1, 1)
+    std_a = np.array(std if std is not None else CLIP_STD, dtype=np.float32).reshape(3, 1, 1)
     arr = arr.transpose(2, 0, 1)
-    arr = (arr - mean) / std
+    arr = (arr - mean_a) / std_a
     return torch.from_numpy(arr)
 
 
@@ -126,7 +135,9 @@ def precompute_embeddings(
         all_embeddings: list[np.ndarray] = []
         for start in range(0, len(paths), batch_size):
             batch_paths = paths[start : start + batch_size]
-            tensors = torch.stack([_load_image_tensor(p, image_size) for p in batch_paths]).to(device)
+            tensors = torch.stack(
+                [_load_image_tensor(p, image_size, info.image_mean, info.image_std) for p in batch_paths]
+            ).to(device)
             with torch.no_grad():
                 summary, _ = backbone(tensors)
                 # L2-normalize
@@ -139,7 +150,11 @@ def precompute_embeddings(
         # Build Spark rows
         rows = [
             Row(
-                image_id=str(ids[i]),
+                # Split-scope the id: raw COCO image ids restart per split, so
+                # they collide across train/val/test. image_id is the Vector
+                # Search primary key, so colliding ids silently dedupe the index
+                # (e.g. 1005 rows -> 706). Prefix with split for global uniqueness.
+                image_id=f"{split}_{ids[i]}",
                 embedding=embeddings_arr[i].tolist(),
                 diagnosis=diagnoses[i],
                 split=split,

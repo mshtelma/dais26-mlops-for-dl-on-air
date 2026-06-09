@@ -146,8 +146,16 @@ The solution: endpoints are **SDK-driven**, created by the `deploy_endpoint` tas
 Deploys:
 - UC catalog, schema, volumes (`dentex_raw`, `model_cache`)
 - MLflow experiment
-- Job definitions (train_detector, precompute_embeddings, drift_monitor)
+- Dev job definitions (train_detector, campaign_sweep, eval_comparison, eval_threshold_grid)
 - Secret scope `dais26-secrets`
+
+The prod champion-side assets deploy under `-t prod` instead: the `deploy_champion_job`
+deployment job (champion deploy + smoke test + embeddings/Vector-Search/drift refresh,
+triggered by a new `detector_champion` version), the standalone `drift_monitor` (paused
+cron), and the champion schema/models. The `deploy_job_detector` challenger job and
+`deploy_champion_job` are both defined globally but connected to their trigger models
+per-target by `connect_deployment_job` (dev models on `-t dev`, `detector_champion` on
+`-t prod`).
 
 Does **not** deploy:
 - Serving endpoints (no `resources/serving/*.yml`; intentionally excluded from `databricks.yml`)
@@ -167,7 +175,10 @@ Does **not** deploy:
    Inside the worker: configure_hf_env(...) → train_detector(...) →
      Trainer.run(): build_detector (rank0_first), DDP wrap (find_unused_parameters=True),
      _epoch_loop, _validate, _save_and_register (rank-0 only):
-       MlflowReporter.log_pyfunc(pip_requirements=serving_pip_requirements())
+       MlflowReporter.log_pyfunc(
+           python_model=serve/detector_model_script.py,   # models-from-code, NOT a pickled instance
+           code_paths=[<dais26_dentex pkg dir>],           # bundle source for serving import
+           pip_requirements=serving_pip_requirements())
        MlflowReporter.set_candidate_alias(@candidate)
    Returns run_id on rank 0; None on other ranks.
    |
@@ -189,15 +200,90 @@ The training core (`Trainer`) is identical across launch paths — `notebook @di
 or `sgcli` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
 or `--config`, builds the `TrainerConfig`, and dispatches to the same `Trainer.run()`.
 
-### Phase 3: `databricks bundle run precompute_embeddings -t dev`
+### Phase 2b (optional): `databricks bundle run campaign_sweep -t dev -- --params sweep_stage=<stage>`
+
+A hyperparameter sweep that tunes both the detector head **and** the C-RADIO / DINOv3
+backbone, sharing the exact same `Trainer` core as the single-run path. `campaign_sweep`
+is the single sweep driver (parametrized by `sweep_stage`); the former standalone
+`hpo_sweep` job is folded into it.
 
 ```
-5. precompute    (notebooks/03_precompute_embeddings.py)
-   C-RADIOv4 forward pass over all 1005 DENTEX images
-   Extract summary (dim 1152), L2-normalize
-   Write to train_embeddings: ARRAY<FLOAT>, CDF enabled
-   Create/sync Vector Search index (embedding_dimension=1152)
+1. setup            (notebooks/00_setup.py)
+   |
+   v
+2. sweep            (notebooks/02b_hpo_sweep.py, serverless notebook → GPU_8xH100)
+   Parent MLflow run = the sweep. For each trial from sweep.iter_trials():
+     - merge base TrainerConfig with the trial's param overrides
+     - @distributed → H100 pool → Trainer(cfg).run() (SWEEP_TRIAL_EPOCHS each)
+     - child run tagged mlflow.parentRunId=<sweep> + sweep_trial_id=<n>
+   After all trials: sweep.select_best() picks the winner by SWEEP_PRIMARY_METRIC.
+   If SWEEP_REGISTER_WINNER: re-train the winner for full TRAIN_EPOCHS with
+     register_model=True + set_candidate_alias=True, then KEEP @challenger only if it
+     clears the best-in-experiment gate (else restore the prior best version).
+   |
+   v
+3. confirm_challenger  (notebooks/04_deploy_serving.py, deploy_action=register_and_set_candidate)
+   Verify-only: resolves @challenger and raises if the gate left no alias. No deploy.
 ```
+
+**LoggedModel metric linkage (MLflow 3).** The `Trainer` re-logs the best-epoch
+`val/*` metrics (plus `val/best_mAP_50` = `SWEEP_PRIMARY_METRIC`) against the
+`model_id` of the LoggedModel that `log_model` creates
+(`Trainer._log_metrics_to_logged_model`), so they render on the experiment's
+**Models** tab and not just the parent run. The best-in-experiment gate in
+`02b_hpo_sweep.py` reads each prior version's metric off its LoggedModel
+(`client.get_logged_model(model_id)`) and falls back to the source run's metric
+only for legacy versions whose LoggedModel carries no linked metric. (The
+deployment job's eval task, `notebooks/10`, links its `val/*` metrics to the
+version's LoggedModel the same way.)
+
+What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
+
+| Knob | Why it's swept |
+|------|----------------|
+| `lr`, `backbone_lr` | discriminative LRs — head learns fast, backbone fine-tunes slowly |
+| `backbone_mode` | `frozen` / `lora` / `partial` / `full` — how much of the encoder to fine-tune |
+| `backbone_trainable_blocks` | depth of unfreeze for `partial` mode |
+| `anchor_mode` (→ `anchor_scales`/`aspect_ratios`) | addresses the per-level anchor over-generation flagged by `arch_probe` |
+| `focal_*`, `weight_decay`, `warmup` | head-side regularization / optimization |
+
+The search space, strategy (`random` / `grid`), trial budget, per-trial epochs, primary
+metric, and whether to register the winner are all config-driven via the `SWEEP_*` block in
+`notebooks/00_config.py`. Trial generation/selection logic lives in `train/sweep.py`
+(`iter_trials` + `select_best`) — pure functions with no torch/mlflow dependency, so they
+are unit-tested in isolation. The sweep job carries a **48-hour** timeout (`timeout_seconds:
+172800`) and runs on `GPU_8xH100`.
+
+> **Architecture audit first.** Before sweeping, run `notebooks/02a_arch_probe.py`. It builds a
+> live detector and runs `models/arch_probe.probe_detection_model` to report anchor counts,
+> positive-anchor fraction per FPN level, delta-clamp overflow, and NMS mode, alongside the
+> static `KNOWN_ISSUES` register (e.g. every anchor scale emitted at every FPN level, which
+> dilutes the positive ratio and is a prime suspect for the ~3% mAP@50 ceiling). The sweep's
+> `anchor_mode` knob exists to test the fix.
+
+### Phase 3: embeddings + Vector Search (folded into `deploy_champion_job`)
+
+These two steps are no longer standalone jobs. They run as chained tasks of the prod
+`deploy_champion_job` (after `deploy_champion`), so the reference embeddings and the VS
+index are always refreshed for the model that just became `@champion`. To re-run them
+manually, run `deploy_champion_job` (optionally `--only precompute_embeddings`).
+
+```
+5. precompute_embeddings  (notebooks/03_precompute_embeddings.py, GPU_1xA10)
+   Frozen-backbone forward pass over all 1005 DENTEX images
+   Extract summary (C-RADIOv4=1152, DINOv3=1024), L2-normalize
+   Write to <prefix>train_embeddings: ARRAY<FLOAT>, CDF enabled
+   (VS index auto-synced only if EMBEDDINGS_VS_* are set in 00_config)
+
+6. create_vector_search   (notebooks/04b_create_vector_search.py, no GPU)
+   Create VS endpoint (dais26-vfm-vs) + DELTA_SYNC index (idempotent)
+   embedding_dimension DERIVED from size(embedding) on the source table
+     → correct for any backbone, no hardcoded dim
+   Trigger sync → poll until ONLINE & fully synced → smoke-test similarity query
+```
+
+The `create_vector_search` branch in `04_deploy_serving.py` is kept in sync with this notebook;
+`04b` is the always-on, `DEPLOY_ACTION`-independent version run by the job.
 
 **Key invariant:** Endpoints are never created before a model version exists.
 
@@ -260,6 +346,26 @@ Use the correct methods:
 - **New endpoint**: `serving_endpoints.create_and_wait(name, config, ai_gateway, tags)`
 - **Existing endpoint**: `serving_endpoints.update_config_and_wait(name, served_entities)`
 
+### Models-from-code serving load path
+
+The detector is logged with `mlflow.pyfunc.log_model(python_model="…/detector_model_script.py", code_paths=[…])`
+— a **script path**, not a `DetectorPyfunc()` instance. Two failure modes drove this:
+
+- **`ModuleNotFoundError: transformers_modules`** — pickling the instance at log time captured a
+  reference to the HuggingFace *dynamic* backbone class (created at runtime by `trust_remote_code=True`),
+  which lives in the `transformers_modules.*` package. The serving container has no such package, so
+  unpickling `python_model.pkl` failed. Models-from-code re-executes the script at load time and builds
+  a fresh `DetectorPyfunc`; the backbone is materialized inside `load_context` and never serialized.
+- **`ModuleNotFoundError: dais26_dentex`** — the pyfunc class lives in a locally-installed package
+  (not on PyPI), so MLflow cannot pin it in `requirements.txt`. `code_paths` bundles the package into
+  the model's `code/` dir; MLflow prepends it to `sys.path` at load time.
+
+At load time the backbone is read strictly offline (`local_files_only=True`, offline HF env) from the
+`model_cache` artifact bundled with the model — the serving container has no egress. `torch.compile`
+is intentionally **disabled** at serving (the DINOv3 modeling stack raises `NameError: torch` under
+TorchDynamo, and CUDA-graph `reduce-overhead` needs static shapes the variable-size image path can't
+guarantee). See [RUNBOOK.md#models-from-code](RUNBOOK.md#models-from-code).
+
 ### ai_gateway placement
 
 `ai_gateway` is a **top-level argument** of `create_and_wait`, not nested under `config`:
@@ -288,6 +394,123 @@ w.serving_endpoints.create_and_wait(
     ),
 )
 ```
+
+---
+
+## Deployment job + cross-schema promotion (MLflow 3)
+
+The flows above describe the original single-schema, alias-flip promotion driven by the
+`deploy_endpoint` task. That path is retained as **break-glass / manual redeploy**. The
+**primary** promotion path is now **two** MLflow 3 deployment jobs that align the repo to
+the Big Book "deploy code" pattern, each connected (via `deployment_job_id`) to the model
+whose new versions trigger it:
+
+1. **`deploy_job_detector` (challenger side, dev)** — connected to the dev detector models.
+   A new `@challenger` version runs Evaluation (val gate vs `@champion`) → Approval →
+   RegisterChampion (copy dev→prod `detector_champion` + set `@champion_candidate`).
+2. **`deploy_champion_job` (champion side, prod)** — connected to `detector_champion`. The
+   new champion **version** that RegisterChampion creates triggers deploy_champion (deploy +
+   smoke test, flip `@champion` only on success) → precompute_embeddings →
+   create_vector_search → drift_baseline.
+
+The cross-schema copy is the hand-off: creating the new `detector_champion` version is the
+event that triggers the champion job. The champion job never creates new `detector_champion`
+versions (it only sets aliases + deploys), so there is no trigger loop.
+
+> **Why a model-version trigger (not `MODEL_ALIAS_SET`)?** The champion side was originally
+> designed as a separate prod job (`champion_deploy`) triggered by `MODEL_ALIAS_SET` on
+> `@champion_candidate`. Job model/alias triggers are in Private Preview and **not supported
+> by the `databricks` Terraform provider** (1.115.0, pinned by the CLI v0.299.2): `bundle
+> validate` accepts `trigger.model`, but `bundle deploy` fails at Terraform apply. The
+> model-**version** deployment trigger (`deployment_job_id` on the registered model) **is**
+> GA and provider-supported, so the champion job is connected to `detector_champion` and
+> fires on the RegisterChampion copy instead. (An intermediate revision folded everything
+> into one job; splitting back out on the version trigger restores the decoupled design.)
+
+### Terminology + asset split
+
+- Dev alias renamed `@candidate` → **`@challenger`** (constant `ALIAS_CANDIDATE` keeps
+  its name for call-site stability; only its value moved — see
+  `src/dais26_dentex/config/constants.py`).
+- **Two schemas** (`notebooks/00_config.py`): dev detectors with `@challenger` live in
+  `CATALOG.SCHEMA` (`mlops_pj.dais26_vfm`), backbone-keyed (`cradio_detector`,
+  `dinov3_detector`) so architectures can be trained/compared side by side. Prod has a
+  **single, backbone-agnostic champion** `detector_champion` with `@champion` in
+  `CHAMPION_CATALOG.CHAMPION_SCHEMA` (`mlops_pj.dais26_vfm_prod`). Both dev backbones
+  funnel into this one prod model — broad deployment comes from one schema/model and is
+  never two competing architecture-named champions. The **dev detector models are NOT
+  bundle-managed** — they are created at runtime by the trainer's first `register_model`
+  (same rationale as the shared dev schema: in `mode: development` DABs would prefix the
+  name to `dev_<user>_cradio_detector`, clashing with the literal `00_config` name and
+  leaving an empty, disconnected duplicate). The **single prod champion** is declared
+  bundle-managed but **prod-target-only** in
+  `resources/registered_models/detector_models_champion.yml` (prod mode applies no prefix,
+  so it resolves to the literal `detector_champion`). The prod schema + SP grants are
+  created by the prod bundle (`databricks.yml` `targets.prod.resources`).
+- `EXPERIMENT_NAME` repointed at the bundle-managed experiment
+  (`resources/experiments/vfm_experiment.yml`) so the trainer, the HPO sweep, the
+  lineage-preserving champion copy, and the eval task's best-in-experiment search all
+  share one experiment root.
+
+### Job graph
+
+```
+new @challenger version on a dev detector model
+        │  (auto-trigger; wired by connect_deployment_job / notebooks/13 on -t dev:
+        │   update_registered_model(deployment_job_id=deploy_job_detector) for both dev detectors)
+        ▼
+deploy_job_detector  (CHALLENGER side; max_concurrent_runs: 1, params model_name + model_version)
+  ├─ Evaluation (notebooks/10, GPU_1xA10 / databricks_ai_v5)
+  │     score @challenger version on VAL via eval.runner.score_model_on_split,
+  │     log val/* metrics to the model version (LoggedModel),
+  │     gate: challenger beats the registered @champion on ≥ 2 of 3 metrics
+  │           (mAP_50, mAP_75, mAP_50_95); auto-pass if there is no @champion yet
+  ├─ Approval_Check (notebooks/11, CPU, no retries)
+  │     task name starts with "approval" → UI shows an Approve button; clicking it
+  │     writes UC tag key==task name (Approval_Check)=Approved + auto-repairs the run.
+  │     pass only if UC tag Approval_Check == Approved on the version
+  └─ RegisterChampion (notebooks/12, CPU)
+        copy_model_version dev → CHAMPION_FULL (lineage to source run preserved),
+        set @champion_candidate on the new prod version (does NOT deploy or flip @champion)
+        │
+        │  the copy creates a NEW detector_champion version
+        │  (auto-trigger; wired by connect_deployment_job / notebooks/13 on -t prod:
+        │   update_registered_model(deployment_job_id=deploy_champion_job) on detector_champion)
+        ▼
+deploy_champion_job  (CHAMPION side, prod; max_concurrent_runs: 1)
+  ├─ deploy_champion (notebooks/14, CPU)
+  │     deploy_and_smoke_test(candidate_alias="champion_candidate",
+  │     promote_on_success=True) → updates the endpoint, smoke-tests, and flips
+  │     @champion ONLY on success (prior champion keeps serving on failure)
+  ├─ precompute_embeddings (notebooks/03, GPU_1xA10) → reference embeddings table
+  │     backbone self-selected from @champion's source_dev_model tag (not BACKBONE)
+  ├─ create_vector_search  (notebooks/04b, CPU)      → VS endpoint + DELTA_SYNC index
+  └─ drift_baseline        (notebooks/05, CPU)        → drift baseline for new champion
+```
+
+Two-alias safety: `@champion_candidate` is the staging alias RegisterChampion sets;
+`deploy_champion_job` deploys it and flips `@champion` only on a passing smoke test, so the
+prior champion keeps serving until the candidate is verified. `@champion` therefore always
+means "verified, live-serving". No trigger loop: the champion job only sets aliases +
+deploys, so it never creates the new `detector_champion` versions that trigger it.
+
+### Challenger registration gate
+
+`02b_hpo_sweep.py` sets `@challenger` on the dev model only when the retrained winner's
+`val/best_mAP_50` strictly beats the experiment's prior best registered version (pure,
+unit-tested `sweep.beats_experiment_best`); otherwise it restores `@challenger` to the
+prior best version. This prevents a regression from auto-triggering the deployment job.
+
+### Closed gaps / alignment notes
+
+| Prior gap | Resolution |
+|-----------|------------|
+| Single schema for `@candidate` + `@champion` | Dev/prod schema split; champion is a lineage-preserving copy, not an alias flip on the dev model |
+| No best-in-experiment gate | Eval task (test split) + challenger registration gate (val split) |
+| Eval on `val`, ungated, standalone | Shared `eval.runner` scores both `val` + `test`; the deployment-job eval task gates promotion on `test` |
+| Per-user experiment | Repointed at the bundle-managed experiment |
+| No dataset lineage | Trainer logs `mlflow.log_input(DENTEX-train, context="training")` |
+| Terminology drift (`candidate`) | Renamed to `challenger` |
 
 ---
 
@@ -343,14 +566,18 @@ Input image (B, 3, 1024, 1024)
         ▼ RetinaNetHead — ~2.8M params
            4 conv layers per subnet (cls + reg), 9 anchors/location
            Focal loss (alpha=0.25, gamma=2.0) + Smooth L1
-           NMS threshold=0.5, score threshold=0.05, max_dets=100
+           Per-class NMS (batched_nms) threshold=0.5, score threshold=0.05, max_dets=100
            │
            ▼
            {'boxes': [[x1,y1,x2,y2],...], 'scores': [...], 'labels': [...]}
 ```
 
-Anchor scales tuned for DENTEX: `[16, 32, 64, 128]` px (smaller than COCO defaults).
-Ratios: `[0.5, 1.0, 2.0]`. Classes: Caries, Deep Caries, Periapical Lesion, Impacted.
+Anchor layout (shipped default): `per_level` sizing — anchor size = `stride x base_scale x
+octave x ratio`, 9 anchors/cell uniform across P3–P6 — with per-class `batched_nms`. This
+replaced the original absolute `[16, 32, 64, 128]` px scales emitted at every FPN level (the
+anchor over-generation bug), which is retained behind a flag. Ratios: `[0.5, 1.0, 2.0]`.
+Classes: Caries, Deep Caries, Periapical Lesion, Impacted. See [HPO.md](HPO.md) for the fix
+and its mAP@50 impact (0.335 → 0.522).
 
 ---
 
@@ -442,13 +669,20 @@ src/dais26_dentex/
 │
 ├── models/
 │   ├── backbones.py          (BackboneInfo dataclass — single source of truth;
-│   │                          C-RADIOv4 trust_remote_code dep guard)
+│   │                          C-RADIOv4 trust_remote_code dep guard;
+│   │                          load_backbone(freeze=) gates train vs frozen)
 │   │     ↑ consumed by everything below
 │   ├── adapters.py           (FPNAdapter; in_channels=backbone_info.spatial_dim)
-│   ├── builder.py            (build_detector wrapped in rank0_first)
-│   ├── detection_head.py     (RetinaNetHead; input from FPNAdapter)
+│   ├── builder.py            (build_detector wrapped in rank0_first; branches on
+│   │                          backbone_mode frozen/lora/full/partial; honors
+│   │                          cfg.anchor_scales/aspect_ratios)
+│   ├── detection_head.py     (RetinaNetHead; forward_train gates backbone
+│   │                          no_grad on whether the encoder is frozen)
 │   ├── targets.py            (anchor generator + target encoding; FPNLevel)
-│   └── peft.py               (STRETCH: LoRA on backbone QKV+proj)
+│   ├── arch_probe.py         (read-only consistency probe + KNOWN_ISSUES register;
+│   │                          driven by notebooks/02a_arch_probe.py)
+│   └── peft.py               (LoRA on backbone QKV+proj; unfreeze_last_blocks for
+│                              backbone_mode=partial)
 │
 ├── platform/
 │   ├── hf_env.py             (configure_hf_env: HF_HOME, TRANSFORMERS_CACHE,
@@ -470,7 +704,9 @@ src/dais26_dentex/
 ├── serve/
 │   ├── detector_pyfunc.py    (uses backbones + adapters + detection_head;
 │   │                          loads Manifest v2; raises IncompatibleArtifactError
-│   │                          on v1 artifacts)
+│   │                          on v1 artifacts; offline backbone load, no torch.compile)
+│   ├── detector_model_script.py (models-from-code loader: set_model(DetectorPyfunc());
+│   │                          logged as python_model instead of a pickled instance)
 │   ├── embedder_pyfunc.py    (uses backbones; returns summary dim=backbone_info.summary_dim)
 │   ├── postprocess.py        (NMS + decode + label remap — split out of pyfunc
 │   │                          for unit-testability)
@@ -479,12 +715,16 @@ src/dais26_dentex/
 └── train/
     ├── trainer.py            (Trainer class — owns DDP wrap, _epoch_loop,
     │                          _validate, _save_and_register; rank-0-only
-    │                          MlflowReporter + UC registration)
+    │                          MlflowReporter + UC registration; discriminative-LR
+    │                          param groups when the backbone is trainable)
     ├── train_detector.py     (thin shim: builds TrainerConfig, calls Trainer(cfg).run())
+    ├── sweep.py              (pure HPO helpers: iter_trials grid/random +
+    │                          select_best; no torch/mlflow — unit-tested)
     ├── losses.py             (focal + smooth-L1)
     └── cli.py                (sgcli/torchrun entrypoint — reads
-                               $HYPERPARAMETERS_PATH or --config; prints
-                               MODEL_URI=<run_id> on rank 0)
+                               $HYPERPARAMETERS_PATH or --config; builds
+                               TrainerConfig and runs Trainer(cfg).run() so every
+                               YAML knob is honored; prints MODEL_URI=<run_id>)
 ```
 
 ### Cross-cutting hardening anchors
@@ -498,22 +738,31 @@ src/dais26_dentex/
 | `configure_hf_env` | `platform/hf_env.py` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` — UC Volume FUSE rejects parallel chunked writes. |
 | `serving_pip_requirements` | `platform/mlflow_io.py` ↔ `pyproject.toml::[tool.dais26.serving-deps]` | One edit to add a runtime dep. The wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` (hatchling `force-include`) so `importlib.resources` resolves it inside AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. |
 | `_log_model_artifact_kwarg` | `platform/mlflow_io.py` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature` — replaces the per-call `try/except TypeError`. |
+| models-from-code + `code_paths` | `serve/detector_model_script.py` + `platform/mlflow_io.py::_default_code_paths` | Detector logged as a script (not a pickled instance) with the package source bundled. Fixes `ModuleNotFoundError: transformers_modules` (dynamic `trust_remote_code` class) and `ModuleNotFoundError: dais26_dentex` at serving. |
 | `UCName` / `VolumePath` | `platform/uc.py` | Regex-validated identifiers; replaces inline `f"{catalog}.{schema}.{name}"` so dotted-catalog typos fail fast. |
 
 ---
 
 ## Unity Catalog resource map
 
+Names are config-driven from `notebooks/00_config.py` (`CATALOG`, `SCHEMA`, `TABLE_PREFIX`, and the
+backbone-keyed model/endpoint names). Current defaults: catalog `mlops_pj`, schema `dais26_vfm`,
+table/index prefix `dais26_dentex_`, backbone `cradio_v4_so400m`. The table below uses the legacy
+`ml`/`cradio_detector` names for illustration.
+
 | Resource type | Full name | Notes |
 |---------------|-----------|-------|
-| Schema | `ml.dais26_vfm` (prod) / `ml_dev.dais26_vfm` (dev) | Created by `00_setup.py` |
+| Schema | `<catalog>.dais26_vfm` | Dev schema; created by `00_setup.py` |
+| Schema | `<catalog>.dais26_vfm_prod` | Prod / champion schema; created by `00_setup.py` |
 | Volume | `…/dentex_raw` | Raw DENTEX images + COCO JSON |
 | Volume | `…/model_cache` | Pinned C-RADIOv4 weights + pre-baked DINOv2 fallback |
 | Delta table | `…/train_embeddings` | `ARRAY<FLOAT>` dim=1152, CDF=true |
 | Delta table | `…/drift_scores` | Hourly drift job output |
 | Delta table | `…/detector_inference_*` | Auto-created by AI Gateway on first request |
-| Registered model | `…/cradio_detector` | Aliases: `@champion`, `@candidate`, `@demo-frozen` |
+| Registered model | `dais26_vfm/cradio_detector` (or `dinov3_detector`) | DEV; backbone-keyed name; alias `@challenger`; bundle-managed |
+| Registered model | `dais26_vfm_prod/detector_champion` | PROD champion; **single, backbone-agnostic** — the approved dev winner of ANY architecture is copied here (lineage preserved, `source_dev_model` tag); aliases `@champion_candidate` → `@champion`; bundle-managed |
+| Serving endpoint | `dais26-detector-champion` | PROD; **single** champion endpoint; serves whatever architecture holds `@champion` |
 | Registered model | `…/cradio_embedder` | Alias: `@champion` (STRETCH) |
 | MLflow experiment | `/Users/<user>/dais26_vfm_experiment` | All training runs |
-| VS index | `…/embeddings_index` | HNSW+L2, dim=1152, Delta Sync |
+| VS index | `…/embeddings_index` | DELTA_SYNC, dim derived from the embeddings table (1152 / 1024) |
 | Secret scope | `dais26-secrets` | Key: `hf-token` (DINOv3 only) |

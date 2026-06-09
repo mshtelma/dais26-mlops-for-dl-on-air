@@ -125,6 +125,21 @@ def _log_model_artifact_kwarg() -> str:
     return "name"
 
 
+@cache
+def _default_code_paths() -> list[str]:
+    """Return ``[<dir of the installed dais26_dentex package>]``.
+
+    Passed to ``log_model(code_paths=...)`` so the package source is bundled
+    with the model and importable at serving without a pip install. We resolve
+    via the imported module's ``__file__`` so it works whether the package was
+    installed as a wheel or in editable mode.
+    """
+    import dais26_dentex
+
+    pkg_dir = Path(dais26_dentex.__file__).resolve().parent
+    return [str(pkg_dir)]
+
+
 # ----------------------------------------------------------------------
 # Reporter
 # ----------------------------------------------------------------------
@@ -143,12 +158,6 @@ class MlflowReporter:
         self.experiment_name = experiment_name
         self.registry_uri = registry_uri or self.REGISTRY_URI
 
-    def configure(self) -> None:
-        """Set the registry URI + experiment. Idempotent."""
-        mlflow.set_registry_uri(self.registry_uri)
-        if self.experiment_name:
-            mlflow.set_experiment(self.experiment_name)
-
     def log_pyfunc(
         self,
         *,
@@ -159,11 +168,21 @@ class MlflowReporter:
         registered_model_name: str | None = None,
         pip_requirements: list[str] | None = None,
         artifact_path: str = "model",
+        code_paths: list[str] | None = None,
     ) -> Any:
         """Wrap ``mlflow.pyfunc.log_model`` with a single call signature.
 
         ``pip_requirements`` defaults to the ``detector`` profile from
         ``[tool.dais26.serving-deps]``.
+
+        ``code_paths`` defaults to the installed ``dais26_dentex`` package dir.
+        This is REQUIRED: the pyfunc class lives in ``dais26_dentex`` which is
+        installed from local source (not PyPI), so MLflow cannot pin it in
+        ``requirements.txt``. Without bundling the source the serving container
+        cannot import the model class and the model server fails to load it.
+        MLflow copies these paths into the model's ``code/`` dir and prepends
+        it to ``sys.path`` at load time, so ``import dais26_dentex`` works with
+        no pip install.
         """
         kwargs: dict[str, Any] = {
             _log_model_artifact_kwarg(): artifact_path,
@@ -172,6 +191,7 @@ class MlflowReporter:
             "signature": signature,
             "input_example": input_example,
             "pip_requirements": pip_requirements or serving_pip_requirements(),
+            "code_paths": code_paths or _default_code_paths(),
         }
         if registered_model_name is not None:
             kwargs["registered_model_name"] = registered_model_name

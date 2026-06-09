@@ -23,6 +23,8 @@ from __future__ import annotations
 import torch
 from torchvision.ops import box_iou
 
+from dais26_dentex.models.detection_head import BOX_DELTA_LOG_CLAMP
+
 
 def coco_xywh_to_xyxy(boxes_xywh: torch.Tensor) -> torch.Tensor:
     """COCO ``[x, y, w, h]`` → ``[x1, y1, x2, y2]`` corner format."""
@@ -56,8 +58,12 @@ def encode_boxes_xyxy_to_deltas(
 
     dx = (g_cx - a_cx) / a_w
     dy = (g_cy - a_cy) / a_h
-    dw = torch.log(g_w / a_w)
-    dh = torch.log(g_h / a_h)
+    # Clamp the log-space size deltas to the same bound `decode_boxes` applies to
+    # `exp(dw/dh)`. Without this the matcher can request a width/height the
+    # decoder can never produce (large gt vs small anchor), injecting an
+    # irreducible localization error. Keeps encode/decode exact inverses.
+    dw = torch.log(g_w / a_w).clamp(max=BOX_DELTA_LOG_CLAMP)
+    dh = torch.log(g_h / a_h).clamp(max=BOX_DELTA_LOG_CLAMP)
     return torch.stack([dx, dy, dw, dh], dim=-1)
 
 

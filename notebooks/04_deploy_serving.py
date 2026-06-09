@@ -2,9 +2,12 @@
 # MAGIC %md
 # MAGIC # 04 — Deploy Serving (SDK-driven)
 # MAGIC Two modes:
-# MAGIC - `register_and_set_candidate`: verifies the trained model is registered + has `@candidate`
-# MAGIC - `deploy_and_smoke_test`: resolves `@candidate` to numeric, deploys endpoint via SDK,
+# MAGIC - `register_and_set_candidate`: verifies the trained model is registered + has `@challenger`
+# MAGIC - `deploy_and_smoke_test`: resolves `@challenger` to numeric, deploys endpoint via SDK,
 # MAGIC   runs smoke test, promotes to `@champion`. Uses create_and_wait / update_config_and_wait.
+# MAGIC
+# MAGIC This is the break-glass / manual deploy path; the primary promotion route is
+# MAGIC the `deploy_job_detector` deployment job (eval -> approval -> cross-schema promote).
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -14,6 +17,16 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 # MAGIC %run ./00_config
+
+# COMMAND ----------
+# Optional per-run override of DEPLOY_ACTION. Jobs can pass it as a notebook
+# parameter (e.g. campaign_sweep's `confirm_challenger` task sets
+# deploy_action=register_and_set_candidate to just verify the @challenger alias
+# without deploying). Falls back to the 00_config default when absent/empty.
+dbutils.widgets.text("deploy_action", "")
+_deploy_action_override = dbutils.widgets.get("deploy_action").strip()
+if _deploy_action_override:
+    DEPLOY_ACTION = _deploy_action_override
 
 # COMMAND ----------
 
@@ -26,17 +39,20 @@ print(f"Endpoint: {DETECTOR_ENDPOINT_NAME}")
 # COMMAND ----------
 
 if DEPLOY_ACTION == "register_and_set_candidate":
-    # The training task already registers + sets @candidate; verify it.
+    # The training task already registers + sets @challenger; verify it.
     import mlflow
     from mlflow.tracking import MlflowClient
+
+    from dais26_dentex.config.constants import ALIAS_CANDIDATE
+
     mlflow.set_registry_uri("databricks-uc")
     client = MlflowClient(registry_uri="databricks-uc")
     try:
-        mv = client.get_model_version_by_alias(name=full_model, alias="candidate")
-        print(f"@candidate -> version {mv.version}")
+        mv = client.get_model_version_by_alias(name=full_model, alias=ALIAS_CANDIDATE)
+        print(f"@{ALIAS_CANDIDATE} -> version {mv.version}")
     except Exception as e:
         raise RuntimeError(
-            f"No @candidate alias on {full_model}; training task may have failed: {e}"
+            f"No @{ALIAS_CANDIDATE} alias on {full_model}; training task may have failed: {e}"
         ) from e
     dbutils.notebook.exit("ok")
 
@@ -56,7 +72,9 @@ if DEPLOY_ACTION == "deploy_and_smoke_test":
         ai_gateway_enabled=True,
         inference_table_prefix=f"{DETECTOR_MODEL_SHORT}_inference",
         promote_on_success=True,
-        timeout_seconds=900,
+        # GPU serving endpoints can take 20-40 min to cold-start on first deploy
+        # (container build + model download + GPU attach); 15 min was too short.
+        timeout_seconds=2400,
     )
     print(result)
     if not result.smoke_test_passed:
@@ -67,14 +85,31 @@ if DEPLOY_ACTION == "deploy_and_smoke_test":
 # COMMAND ----------
 
 if DEPLOY_ACTION == "create_vector_search":
+    # NOTE: a self-contained, always-on version of this logic lives in
+    # notebooks/04b_create_vector_search.py (run via the create_vector_search
+    # job). This branch is kept in sync with it.
     from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.vectorsearch import (
+        DeltaSyncVectorIndexSpecRequest,
+        EmbeddingVectorColumn,
+        EndpointType,
+        PipelineType,
+        VectorIndexType,
+    )
 
     w = WorkspaceClient()
+
+    # Derive the embedding dimension from the source table so this stays correct
+    # regardless of backbone (C-RADIOv4-SO400M=1152, DINOv3-ViTL16=1024).
+    source_table = TRAIN_EMBEDDINGS_TABLE
+    embedding_dim = int(
+        spark.sql(f"SELECT size(embedding) AS d FROM {source_table} LIMIT 1").collect()[0]["d"]
+    )
 
     # Create endpoint (if not exists)
     try:
         w.vector_search_endpoints.create_endpoint_and_wait(
-            name=VS_ENDPOINT_NAME, endpoint_type="STANDARD",
+            name=VS_ENDPOINT_NAME, endpoint_type=EndpointType.STANDARD,
         )
         print(f"Created VS endpoint: {VS_ENDPOINT_NAME}")
     except Exception as e:
@@ -83,22 +118,22 @@ if DEPLOY_ACTION == "create_vector_search":
         else:
             raise
 
-    # Create Delta Sync index with precomputed embeddings (dim=1152 for C-RADIOv4)
-    source_table = TRAIN_EMBEDDINGS_TABLE
-    print(f"Creating index {VS_INDEX_NAME} from {source_table}")
+    # Create Delta Sync index with precomputed (self-managed) embeddings
+    print(f"Creating index {VS_INDEX_NAME} from {source_table} (dim={embedding_dim})")
     try:
         w.vector_search_indexes.create_index(
             name=VS_INDEX_NAME,
             endpoint_name=VS_ENDPOINT_NAME,
             primary_key="image_id",
-            index_type="DELTA_SYNC",
-            delta_sync_index_spec={
-                "source_table": source_table,
-                "embedding_vector_column": "embedding",
-                "embedding_dimension": 1152,
-                "pipeline_type": "TRIGGERED",
-                "columns_to_sync": ["image_id", "diagnosis", "split"],
-            },
+            index_type=VectorIndexType.DELTA_SYNC,
+            delta_sync_index_spec=DeltaSyncVectorIndexSpecRequest(
+                source_table=source_table,
+                embedding_vector_columns=[
+                    EmbeddingVectorColumn(name="embedding", embedding_dimension=embedding_dim),
+                ],
+                pipeline_type=PipelineType.TRIGGERED,
+                columns_to_sync=["image_id", "diagnosis", "split"],
+            ),
         )
         print(f"Created VS index: {VS_INDEX_NAME}")
     except Exception as e:

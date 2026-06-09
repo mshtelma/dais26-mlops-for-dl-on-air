@@ -1,0 +1,80 @@
+name: Deploy Bundle
+
+# Deploys the DAB and wires the deployment-job linkage in one shot.
+# DABs cannot declare `deployment_job_id` on a registered model, so after every
+# `bundle deploy` we must run `connect_deployment_job` (notebooks/13) to call
+# update_registered_model(deployment_job_id=...) on the dev detector models.
+#
+# Auth: OAuth machine-to-machine (M2M) with a service principal client id +
+# OAuth secret. The secret mints short-lived OAuth tokens (no long-lived PAT).
+# This path needs only SP-create + OAuth-secret rights (no account admin /
+# federation policy). See docs/RUNBOOK.md#cicd-oauth-m2m for setup.
+#
+# The job binds to a GitHub Environment (dev/prod) so that:
+#   1. DATABRICKS_HOST / DATABRICKS_CLIENT_ID (vars) and DATABRICKS_CLIENT_SECRET
+#      (secret) are scoped per environment — dev and prod can target different
+#      workspaces / service principals; and
+#   2. prod can require a manual approval (Environment protection rule).
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Bundle target to deploy"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - prod
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never let two deploys to the same target race (the connect job is one-shot).
+  group: deploy-${{ github.event.inputs.target || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # GitHub Environment == bundle target. Create `dev` and `prod` environments
+    # in repo settings; scope DATABRICKS_HOST / DATABRICKS_CLIENT_ID (vars) and
+    # DATABRICKS_CLIENT_SECRET (secret) to each, and add a required reviewer on
+    # `prod` to gate production deploys.
+    environment: ${{ github.event.inputs.target || 'dev' }}
+    env:
+      TARGET: ${{ github.event.inputs.target || 'dev' }}
+      DATABRICKS_AUTH_TYPE: oauth-m2m
+      DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+      DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+      DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@main
+
+      - name: Verify auth
+        run: databricks current-user me
+
+      - name: Deploy bundle
+        # The deploy identity IS the service principal, so prod's
+        # `run_as: ${var.sp_app_id}` is the same SP — reuse the client id.
+        run: |
+          databricks bundle deploy -t "$TARGET" --var="sp_app_id=${DATABRICKS_CLIENT_ID}"
+
+      - name: Wire deployment-job linkage (connect_deployment_job)
+        run: |
+          databricks bundle run connect_deployment_job -t "$TARGET" --var="sp_app_id=${DATABRICKS_CLIENT_ID}"
