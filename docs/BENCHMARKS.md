@@ -117,7 +117,7 @@ Target: top-10 recall ≥ 0.80 same-class on 50 val images against 705 train ima
 
 | Index config | Query corpus | Recall@10 (same-class) | Mean query latency |
 |-------------|-------------|----------------------|-------------------|
-| HNSW+L2, dim=1152 | 50 val images | TBD | TBD |
+| HNSW+L2, dim=2304 | 50 val images | TBD | TBD |
 
 Recall definition: for each of the 50 val queries, count same-diagnosis results in top-10.
 Recall = (total same-class hits) / (50 × 10).

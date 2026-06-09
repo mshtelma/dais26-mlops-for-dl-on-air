@@ -60,11 +60,11 @@ Only the 5-million-parameter detection head learns."
   - "No trained weights are in the repo. You download them at runtime."
 
 - **Slide 5:** BackboneInfo contract diagram.
-  - `summary` → shape `(B, 1152)` — global image feature. Used for embeddings, drift, VS.
+  - `summary` → shape `(B, 2304)` — global image feature. Used for embeddings, drift, VS.
   - `spatial_features` → shape `(B, T, 1152)` — patch features. Used for detection FPN.
-  - "Same hidden dim (1152), but two distinct outputs — `summary` is pooled, `spatial_features` is
-    per-patch. Everything downstream parameterizes on `backbone_info.summary_dim` or
-    `backbone_info.spatial_dim` — never hardcoded."
+  - "Two distinct outputs with distinct dims — `spatial_features` keep the 1152 ViT hidden dim;
+    `summary` is RADIO's pooled global feature at 2304 (2×1152). Everything downstream
+    parameterizes on `backbone_info.summary_dim` or `backbone_info.spatial_dim` — never hardcoded."
 
 - **Slide 6:** The three-jobs architecture diagram (matches ARCHITECTURE.md system overview).
   One UC Volume. Three consumers. One frozen backbone artifact.
@@ -124,19 +124,19 @@ Demonstrate Vector Search top-10 and a UMAP of the embedding space.
    results = w.vector_search_indexes.query_index(
        index_name="ml.dais26_vfm.embeddings_index",
        columns=["image_id", "diagnosis"],
-       query_vector=query_embedding,   # summary dim=1152
+       query_vector=query_embedding,   # summary dim=2304
        num_results=10,
    )
    ```
 3. Display the top-10 images. Most should be Periapical Lesion (same diagnosis).
-4. "The embedding is `summary` — dim 1152. The Vector Search index holds 1005 embeddings, one
-   per training image, HNSW+L2."
+4. "The embedding is `summary` — dim 2304 (RADIO pools two reps, 2×1152). The Vector Search index
+   holds 1005 embeddings, one per training image, HNSW+L2."
 5. Switch to `03_precompute_embeddings.py` (pre-baked UMAP cell). Show the scatter plot:
    embeddings colored by diagnosis form visible clusters.
 6. "Same backbone as the detector. Different output tensor. Different downstream artifact.
    `summary` for semantic similarity; `spatial_features` for pixel-level detection."
 
-**Key slide (Slide 12):** BackboneInfo contract revisited. `summary` (1152, pooled) and `spatial_features` (1152, per-patch) — same hidden dim, distinct outputs.
+**Key slide (Slide 12):** BackboneInfo contract revisited. `summary` (2304, pooled = 2×1152) and `spatial_features` (1152, per-patch) — distinct outputs, distinct dims.
 
 **Backup:** Switch to `seg3_similarity.mp4`.
 
@@ -151,7 +151,7 @@ any latency to detection requests.
 
 1. Run the "demo" mode cell. This:
    - Takes 50 clean val images and 50 synthetically shifted images (contrast=0.5, gamma=2.0).
-   - Re-embeds all 100 images via C-RADIOv4 `summary` (dim 1152).
+   - Re-embeds all 100 images via C-RADIOv4 `summary` (dim 2304).
    - Computes KNN distance (k=50) against the 705-image training reference.
 2. Display the KNN distance bar chart: clean batch vs. shifted batch.
 3. "The shifted batch has a KNN distance ≥ 2× the clean batch. The 95% bootstrap CI excludes zero."
@@ -226,8 +226,8 @@ Introduce the Mosaic AI vs. alternatives comparison.
   | Role | Backbone output | Artifact |
   |------|----------------|---------|
   | Detection head | `spatial_features` dim=1152 | Mosaic AI serving endpoint |
-  | Embedding service | `summary` dim=1152 | VS index + Delta table |
-  | Drift sensor | `summary` dim=1152 | `drift_scores` Delta table |
+  | Embedding service | `summary` dim=2304 | VS index + Delta table |
+  | Drift sensor | `summary` dim=2304 | `drift_scores` Delta table |
 
 - **Slide 20:** UC lineage diagram.
   `dentex_raw` Volume → training job → `cradio_detector` model → serving endpoint → inference table
@@ -267,7 +267,7 @@ Common expected questions and suggested answers:
 | Slide | Content | Why critical |
 |-------|---------|-------------|
 | Slide 4 | License | DENTEX is CC-BY-NC-SA. Must be stated explicitly. |
-| Slide 5 | BackboneInfo contract | summary=1152 (pooled), spatial=1152 (per-patch). Wrong tensor → wrong artifacts. |
+| Slide 5 | BackboneInfo contract | summary=2304 (pooled, 2×1152), spatial=1152 (per-patch). Wrong tensor → wrong artifacts. |
 | Slide 10 | Two-phase deploy | Explains why endpoints are SDK-driven, not YAML. |
 | Slide 16 | Latency table | Actual benchmark numbers from Phase 4. |
 | Slide 21 | What to take home | Reproducibility message + repo link. |

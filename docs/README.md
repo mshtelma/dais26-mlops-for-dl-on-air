@@ -235,7 +235,7 @@ databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 
 `precompute_embeddings` is a task inside the prod `deploy_champion_job` (not a standalone job).
 This runs `03_precompute_embeddings.py` on serverless GPU, which:
-- Computes the backbone `summary` embeddings (C-RADIOv4: dim 1152, DINOv3: dim 1024) for all 1005 DENTEX images
+- Computes the backbone `summary` embeddings (C-RADIOv4: dim 2304, DINOv3: dim 1024) for all 1005 DENTEX images
 - Writes to `<catalog>.<schema>.<prefix>train_embeddings` as `ARRAY<FLOAT>` with Change Data Feed enabled
 
 Wait for completion (~15-20 minutes). The Vector Search index is **not** created here unless
@@ -301,7 +301,7 @@ w = WorkspaceClient()
 results = w.vector_search_indexes.query_index(
     index_name="ml_dev.dais26_vfm.embeddings_index",
     columns=["image_id", "diagnosis"],
-    query_vector=[0.0] * 1152,   # backbone summary_dim: C-RADIOv4=1152, DINOv3-ViTL16=1024
+    query_vector=[0.0] * 2304,   # backbone summary_dim: C-RADIOv4=2304, DINOv3-ViTL16=1024
     num_results=10,
 )
 

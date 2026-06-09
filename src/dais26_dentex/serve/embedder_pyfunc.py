@@ -24,7 +24,8 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
 
     Input schema: DataFrame with column 'image' (base64-encoded PNG/JPEG string).
     Output schema: DataFrame with column 'embedding' (list[float], length backbone.summary_dim).
-    For C-RADIOv4-SO400M: length 1152. For DINOv2-base fallback: length 768.
+    For C-RADIOv4-SO400M: length 2304 (RADIO summary = 2x the 1152 hidden dim).
+    For DINOv3-ViTL16: length 1024. For DINOv2-base fallback: length 768.
 
     Configuration artifacts:
         - 'backbone_config' (json): {name, revision, summary_dim, spatial_dim, patch_size}
@@ -99,10 +100,12 @@ class EmbedderPyfunc(mlflow.pyfunc.PythonModel):
         return pd.DataFrame({"embedding": [row.cpu().tolist() for row in summary]})
 
 
-def build_embedder_signature_and_example(summary_dim: int = 1152) -> tuple[Any, pd.DataFrame]:
+def build_embedder_signature_and_example(summary_dim: int = 2304) -> tuple[Any, pd.DataFrame]:
     """Construct an MLflow signature for the embedder.
 
-    summary_dim defaults to 1152 (C-RADIOv4); pass 768 for the DINOv2 fallback path.
+    summary_dim defaults to 2304 (C-RADIOv4 RADIO summary = 2x 1152); pass 1024
+    for DINOv3 or 768 for the DINOv2 fallback path. Callers that log a real
+    embedder should pass ``backbone_info.summary_dim`` rather than rely on this default.
     """
     from mlflow.models import infer_signature
 

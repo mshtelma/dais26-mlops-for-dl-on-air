@@ -84,6 +84,10 @@ result = deploy_and_smoke_test(
     scale_to_zero=DEPLOY_SCALE_TO_ZERO,
     timeout_seconds=DEPLOY_TIMEOUT_SECONDS,
     promote_on_success=True,
+    # Lets the deploy reconcile an orphaned AI Gateway payload table (rename-to-archive)
+    # left by a previously torn-down champion endpoint, so a fresh create doesn't hit
+    # "inference table already exists". `spark` is the serverless notebook session.
+    spark=spark,
 )
 print(result)
 
