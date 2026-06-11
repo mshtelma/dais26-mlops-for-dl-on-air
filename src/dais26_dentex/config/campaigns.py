@@ -109,6 +109,26 @@ SWEEP_DEFAULTS = CampaignStage(
 # were SEEDED with the then-current best and updated to the prior stage's
 # MLflow winner before launching (the chain is inherently sequential).
 CAMPAIGN_STAGES: dict[str, CampaignStage] = {
+    # ===== Plumbing smoke (NOT part of the science campaign) =====
+    "smoke": CampaignStage(  # cheapest end-to-end sweep: 1 trial x 1 epoch + 2-epoch retrain
+        # Exists to validate the sweep lanes (notebook 02b AND
+        # sgcli/workload_sweep.yaml) end-to-end in minutes instead of hours:
+        # parent run + one nested trial + one measure-only retrain, no
+        # registration, no alias movement. Uses the C-RADIO recipe base so the
+        # ungated backbone path is exercised.
+        backbone="cradio_v4_so400m",
+        trial_epochs=1,
+        schedule_epochs=(2,),
+        max_trials=1,
+        register_winner=False,
+        pinned={
+            "backbone_mode": "frozen",  # cheapest: head-only gradients
+            "anchor_layout": "per_level", "anchor_base_scale": 3.0, "nms_per_class": True,
+            "amp_dtype": "auto", "batch_size": 4, "img_size": 1024,
+            "lr": 2e-4,
+        },
+        search_space={"base_seed": [42]},
+    ),
     # ===== Campaign 1 — DINOv3 (fp32; fix = regularize THEN extend + raise res) =====
     "dinov3_s1": CampaignStage(  # resolution x schedule
         backbone="dinov3_vitl16",

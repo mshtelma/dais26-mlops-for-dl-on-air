@@ -14,6 +14,7 @@ from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.train.sweep import iter_trials
 
 EXPECTED_STAGES = {
+    "smoke",  # lane-plumbing validation stage, not part of the science campaign
     "dinov3_s1", "dinov3_regres", "dinov3_s2", "dinov3_s3", "dinov3_s4",
     "dinov3_res1536", "dinov3_falpha", "dinov3_fusion",
     "cradio_s1", "cradio_long", "cradio_s2", "cradio_s3", "cradio_s4",
@@ -98,3 +99,13 @@ def test_finalize_stages_register() -> None:
         assert CAMPAIGN_STAGES[name].register_winner, name
     for name in ("dinov3_s1", "cradio_s1", "cradio_long", "dinov3_fusion"):
         assert not CAMPAIGN_STAGES[name].register_winner, name
+
+
+def test_smoke_stage_is_cheap_and_side_effect_free() -> None:
+    """The smoke stage exists to validate lane plumbing in minutes: it must
+    never register/move aliases and must stay tiny."""
+    smoke = CAMPAIGN_STAGES["smoke"]
+    assert smoke.register_winner is False
+    assert smoke.max_trials == 1
+    assert smoke.trial_epochs <= 2
+    assert max(smoke.schedule_epochs) <= 5
