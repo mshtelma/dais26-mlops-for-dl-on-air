@@ -3,11 +3,12 @@
 # MAGIC # 02 — Train Detector on AIR (multi-GPU via `@distributed`)
 # MAGIC
 # MAGIC Fine-tunes the FPN + RetinaNet head over a **frozen C-RADIOv4-SO400M** backbone on DENTEX.
-# MAGIC The notebook driver runs on serverless compute; the `@distributed` decorator dispatches
-# MAGIC the actual training to the H100 serverless GPU pool. No traditional ML cluster involved.
+# MAGIC This is the DAB quickstart launcher: the job task runs on one `GPU_8xH100`
+# MAGIC AIR notebook environment and uses the local `serverless_gpu.@distributed`
+# MAGIC helper to use the task's eight H100s. This path does **not** use `torchrun`.
 # MAGIC
-# MAGIC Logs to MLflow, registers the model in UC, sets `@candidate` alias (NOT `@champion` —
-# MAGIC promotion happens after smoke test in the `deploy_endpoint` task).
+# MAGIC Logs to MLflow, registers the model in UC, and sets `@challenger`. Endpoint
+# MAGIC deploy, smoke test, and `@champion` promotion live in separate operator lanes.
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -39,16 +40,17 @@ from serverless_gpu import distributed
 
 @distributed(gpus=TRAIN_GPUS, gpu_type=TRAIN_GPU_TYPE)
 def run_train():
-    # Body runs in the serverless GPU pool, not on the driver — no spark / dbutils.
-    # HF env must be set BEFORE any HF import on this worker (constants-module
-    # import locks the values). The `train_detector` import below is intentionally
-    # deferred for the same reason. See docs/RUNBOOK.md#hf-transfer-fuse-incompat.
+    # Body runs on the GPU workers, not on the notebook driver - no spark / dbutils.
+    # HF env must be set BEFORE any HF import on this worker. The trainer imports
+    # below are intentionally deferred for the same reason. See
+    # docs/RUNBOOK.md#hf-transfer-fuse-incompat.
     import os
+
     os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
     os.environ["HF_HUB_DOWNLOAD_TIMEOUT"] = "600"
     # Gated-model auth for the backbone download. `load_backbone` reads
     # os.environ.get("HF_TOKEN"); set it here (BEFORE the deferred
-    # train_detector import) from the closure-captured driver value. No-op for
+    # trainer import) from the closure-captured driver value. No-op for
     # the C-RADIO path when the secret is absent (empty string).
     if hf_token:
         os.environ["HF_TOKEN"] = hf_token
@@ -57,9 +59,10 @@ def run_train():
     # AIR workers don't inherit the driver's process env.
     os.environ["MLFLOW_EXPERIMENT_NAME"] = EXPERIMENT_NAME
 
-    from dais26_dentex.train.train_detector import train_detector
+    from dais26_dentex.config.trainer_config import TrainerConfig
+    from dais26_dentex.train.trainer import Trainer
 
-    return train_detector(
+    cfg = TrainerConfig(
         catalog=CATALOG,
         schema=SCHEMA,
         backbone_name=BACKBONE,                                        # type: ignore[arg-type]
@@ -77,6 +80,8 @@ def run_train():
         register_model=True,
         set_candidate_alias=True,
     )
+    cfg.validate()
+    return Trainer(cfg).run()
 
 
 # Set MLFLOW_EXPERIMENT_NAME on the driver BEFORE .distributed() — both for any

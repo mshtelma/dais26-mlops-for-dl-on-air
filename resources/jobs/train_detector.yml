@@ -4,29 +4,30 @@ targets:
       jobs:
         train_detector:
           name: "dais26_train_detector_${bundle.target}"
-          description: "Train frozen-backbone C-RADIOv4 + RetinaNet on AIR via @distributed (serverless GPU). Register @candidate, deploy endpoint via SDK, smoke test, promote to @champion."
+          description: "Quickstart: train frozen-backbone C-RADIOv4 + RetinaNet on one 8xH100 AIR notebook task, register @challenger, and stop before endpoint deploy or champion promotion."
           tags:
             project: "dais26-vfm"
             component: "training"
           # 8h: full C-RADIO backbone fine-tune + longer schedules need headroom on
-          # the H100 pool (the frozen-head recipe finished well under 2h).
+          # the 8xH100 task (the frozen-head recipe finished well under 2h).
           timeout_seconds: 28800
           # Queue if serverless GPU capacity isn't immediately available.
           queue:
             enabled: true
           performance_target: PERFORMANCE_OPTIMIZED
 
-          # AIR-only — no job_clusters. setup/deploy_endpoint run on the standard
-          # serverless env ("default"); the train task runs on Serverless GPU
-          # (8xH100, "databricks_ai_v5" base env) where the `serverless_gpu` package
-          # used by @distributed is preinstalled. The wheel is attached per-env via
-          # `dependencies` (serverless tasks reject the task-level `libraries` field).
+          # AIR-only — no job_clusters. setup/confirm_challenger run on the standard
+          # serverless env ("default"); the train task runs on one GPU_8xH100
+          # databricks_ai_v5 notebook task. The notebook uses the local
+          # `serverless_gpu` helper; the DAB lane does not use torchrun. The wheel is
+          # attached per-env via `dependencies` (serverless tasks reject task-level
+          # `libraries`).
           #
           # All notebook config (catalog / schema / backbone / hyperparameters /
-          # endpoint / workload sizing) lives in notebooks/00_config.py and is
-          # pulled in via `%run ./00_config`. No widget-style base_parameters
-          # — edit 00_config.py to switch values (incl. TRAIN_GPUS / TRAIN_GPU_TYPE,
-          # which must match the train task's hardware_accelerator below).
+          # workload sizing) lives in notebooks/00_config.py and is pulled in via
+          # `%run ./00_config`. No widget-style base_parameters — edit 00_config.py
+          # to switch values (incl. TRAIN_GPUS / TRAIN_GPU_TYPE, which must match
+          # the train task's hardware_accelerator below).
 
           environments:
             - environment_key: "default"
@@ -57,10 +58,15 @@ targets:
                 hardware_accelerator: GPU_8xH100
               max_retries: 1
 
-            - task_key: "deploy_endpoint"
+            # Quickstart stops after registration. This task resolves @challenger
+            # and fails loudly if training did not register a usable version; it
+            # does not create/update an endpoint or promote @champion.
+            - task_key: "confirm_challenger"
               depends_on:
                 - task_key: "train"
               notebook_task:
                 notebook_path: "../../notebooks/04_deploy_serving.py"
+                base_parameters:
+                  deploy_action: "register_and_set_candidate"
               environment_key: "default"
-              max_retries: 1
+              max_retries: 0

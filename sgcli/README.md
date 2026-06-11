@@ -40,14 +40,14 @@ sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
 
 The workload:
 
-1. Snapshots the entire repo (`code_source.snapshot.repo_path: ..`) to the GPU pod, including
+1. Snapshots the entire repo (`code_source.snapshot.repo_path: .`) to the GPU pod, including
    uncommitted edits (`allow_uncommitted: true`). For a reproducible release run, flip
    `allow_uncommitted: false` and pin `git_commit:` instead — sgcli treats them as mutually
    exclusive.
 2. Installs deps from `requirements.yaml` (AIR base env v4 supplies torch, mlflow, etc.).
 3. `pip install .` so `dais26_dentex.train.cli` is importable (no `-e`; snapshot is read-only).
 4. Launches `torchrun --nproc_per_node=8 -m dais26_dentex.train.cli` across the 8 H100s of one node.
-5. Each rank runs `train_detector(...)` with kwargs read from `$HYPERPARAMETERS_PATH`.
+5. The package CLI reads `$HYPERPARAMETERS_PATH`, builds `TrainerConfig`, and runs `Trainer`.
 6. Rank 0 logs the MLflow run, registers the model in UC, and sets `@challenger`.
 
 ## Override at submit time
@@ -75,6 +75,8 @@ sgcli cancel     <run-id>  -p dev
 - `compute.gpus: 16` (or 24 / 32) automatically becomes multi-node — the `command:` arithmetic
   computes `NNODES = WORLD_SIZE / GPUS_PER_NODE` correctly.
 - The notebook entrypoint (`notebooks/02_train_detector_air.py`) and this sgcli workload
-  share the same `src/dais26_dentex/train/train_detector.py` core. They differ only in how the
-  `torch.distributed` ranks are launched.
-- All training is **AIR-only** (Serverless GPU Compute) — no traditional ML clusters.
+  share the same `TrainerConfig` + `Trainer` core. The notebook path uses the local
+  `serverless_gpu.@distributed` helper and does not use `torchrun`; this SGCLI path uses
+  `torchrun`.
+- All quickstart training is **AIR-only** on single-node 8xH100 by default — no traditional
+  ML clusters.

@@ -29,7 +29,7 @@ compute:
 
 max_retries: 1
 # 8h: full backbone fine-tune + longer schedules (and multi-trial sweeps that
-# reuse this workload) must not be killed mid-run on the H100 pool.
+# reuse this workload) must not be killed mid-run on the 8xH100 task.
 timeout_minutes: 480
 
 code_source:
@@ -53,7 +53,7 @@ parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
   backbone_revision: main          # BACKBONE_REVISION
   volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw   # VOLUME_PATH
   cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache    # CACHE_DIR
-  epochs: 10                       # TRAIN_EPOCHS
+  epochs: 50                       # TRAIN_EPOCHS
   lr: 0.001                        # TRAIN_LR
   batch_size: 8                    # TRAIN_BATCH_SIZE
   num_workers: 4                   # train_detector default; no notebook override

@@ -486,7 +486,7 @@ class Trainer:
         )
 
     def _save_and_register(self, info: Any) -> None:
-        """Rank-0 only: write v2 artifacts, log pyfunc, set @candidate alias."""
+        """Rank-0 only: write v2 artifacts, log pyfunc, set @challenger alias."""
         cfg = self.cfg
         if self._best_state_dict is None:
             logger.warning("No best state captured; skipping save.")
@@ -564,7 +564,7 @@ class Trainer:
             logger.info("Logged %d best-epoch metric(s) to LoggedModel %s", len(metrics), model_id)
         except TypeError:
             logger.info("mlflow.log_metrics has no model_id kwarg; metrics live on the run only.")
-        except Exception as e:  # noqa: BLE001 — lineage nicety, never fail a trained run
+        except Exception as e:
             logger.warning("Could not log metrics to LoggedModel %s: %s", model_id, e)
 
     # ------------------------------------------------------------------

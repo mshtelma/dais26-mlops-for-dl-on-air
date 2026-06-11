@@ -1,26 +1,27 @@
 # Quickstart
 
-This guide walks you through deploying the DAIS26 VFM showcase from a clean workspace in under 60 minutes.
+This guide gets a clean workspace to a registered `@challenger` detector model.
+It intentionally stops before endpoint deployment, champion promotion, embeddings,
+Vector Search, and drift. Those are operator lanes after the quickstarts are
+green.
 
 ## Prerequisites
 
-Before running the 11-step sequence, verify the following are available in your Databricks workspace:
+Before running either quickstart, verify the following are available in your Databricks workspace:
 
 | Requirement | Check |
 |-------------|-------|
 | Unity Catalog enabled | Workspace settings → Unity Catalog |
-| AI Runtime access with H100 quota | `databricks clusters spark-versions \| grep -i ai-runtime` |
-| Mosaic AI Model Serving GPU enabled | Workspace settings → Model Serving |
-| Mosaic AI Vector Search enabled | Workspace settings → Vector Search |
+| AI Runtime access with single-node 8xH100 quota | Databricks account / workspace quota |
 | Databricks CLI v0.230+ | `databricks version` |
-| Service principal (prod target only) | See [RUNBOOK.md](RUNBOOK.md#service-principal-creation) |
+| `sgcli` private-preview wheel | Required only for the SGCLI quickstart |
 
 HuggingFace account is **not** required for the default C-RADIOv4 path (ungated). A HF token is only
 needed if you activate the DINOv3 comparison path.
 
 ---
 
-## 11-Step Deployment Sequence (E14)
+## Shared Setup
 
 ### Step 1 — Clone and enter the repo
 
@@ -63,43 +64,7 @@ Replace `<DATABRICKS_HOST>` with your workspace URL (e.g., `https://adb-12345678
 This writes credentials to `~/.databrickscfg`. Alternatively, export `DATABRICKS_HOST` and
 `DATABRICKS_TOKEN` environment variables.
 
-### Step 4 — Discover AIR runtime values (Day 1 gate)
-
-```bash
-python scripts/discover_air_runtime.py
-```
-
-This script lists available AI Runtime spark versions and node types, writes discovered values to
-`.air-discovery.json`, and prints the values to substitute into `databricks.yml`.
-
-After running, update the two DAB variables in `databricks.yml`:
-
-```yaml
-variables:
-  air_spark_version:
-    default: "<value from discover_air_runtime.py>"   # e.g. "ai-runtime-16.4.x-gpu-scala2.12"
-  air_node_type_id:
-    default: "<value from discover_air_runtime.py>"   # e.g. "Standard_NC24ads_A100_v4"
-```
-
-Until these are set, `databricks bundle validate` will fail with a `TODO_DISCOVER_DAY1` error.
-
-Also pin the C-RADIOv4 commit SHA at this point:
-
-```bash
-# Find the current HEAD SHA on HuggingFace
-python -c "
-from huggingface_hub import HfApi
-api = HfApi()
-commits = api.list_repo_commits('nvidia/C-RADIOv4-SO400M')
-print(commits[0].commit_id)
-"
-# Then set in databricks.yml:
-#   cradio_commit_sha:
-#     default: "<sha>"
-```
-
-### Step 5 — Build the Python wheel
+### Step 4 — Build the Python wheel
 
 ```bash
 uv build
@@ -122,7 +87,7 @@ python -m zipfile -l dist/dais26_dentex-0.1.0-py3-none-any.whl | grep _pyproject
 # → dais26_dentex/_pyproject.toml ...
 ```
 
-### Step 6 — Deploy infrastructure (Phase 1)
+### Step 5 — Deploy dev infrastructure
 
 ```bash
 databricks bundle deploy -t dev
@@ -141,40 +106,30 @@ What gets created:
 > under `databricks bundle deploy -t prod` because their tables and VS index live in
 > the champion schema (`dais26_vfm_prod`).
 
-### Step 7 — Run the training job (Phase 2)
+---
+
+## DAB Quickstart
+
+Run the Databricks Asset Bundle training job:
 
 ```bash
 databricks bundle run train_detector -t dev
 ```
 
-This job executes three serverless notebook tasks in sequence:
+This job executes three notebook tasks:
 
 ```
 setup (00_setup.py)
   --> train (02_train_detector_air.py)
-      --> deploy_endpoint (04_deploy_serving.py)
+      --> confirm_challenger (04_deploy_serving.py)
 ```
 
-The `train` task is a serverless notebook that calls `serverless_gpu.@distributed`
-to dispatch the actual GPU work to the H100 pool — the training core lives in
-`src/dais26_dentex/train/trainer.py::Trainer` (rank-0-only MLflow log_model and
-UC registration with `@candidate` alias). The `deploy_endpoint` task switches on
-`DEPLOY_ACTION` from `notebooks/00_config.py`:
+The `train` task runs on one `GPU_8xH100` AIR notebook environment. It uses
+`serverless_gpu.@distributed` inside the notebook and does **not** use
+`torchrun`. The `confirm_challenger` task only resolves `@challenger`; it does
+not create/update a serving endpoint and does not set `@champion`.
 
-1. `register_and_set_candidate` — verifies the trained model is registered + has `@candidate`
-2. `deploy_and_smoke_test` — does the real work:
-   - Resolves the `@candidate` alias to a numeric model version
-   - Creates the endpoint `dais26-cradio-detector-dev` via the Databricks SDK
-   - Waits up to 900s for the endpoint to reach `READY` state
-   - Runs a smoke test (1 sample image, expects 200 OK with detections)
-   - Promotes `@candidate` to `@champion` on success
-
-Endpoint orchestration (create / update / wait / smoke / promote) is centralized
-in `src/dais26_dentex/serve/endpoint_manager.py::deploy_and_smoke_test`.
-
-### Step 8 — Wait for the training job to complete
-
-Expected wall time: **20-30 minutes** on a single H100 (10 epochs default).
+Expected wall time depends on `TRAIN_EPOCHS` in `notebooks/00_config.py`.
 
 Monitor progress in the Databricks Jobs UI or via:
 
@@ -183,31 +138,60 @@ Monitor progress in the Databricks Jobs UI or via:
 databricks jobs get-run <run-id>
 ```
 
-To run a faster 1-epoch validation gate instead of 10 epochs:
+Success criteria:
+
+- the job reaches `TERMINATED/SUCCESS`
+- `confirm_challenger` prints `@challenger -> version <n>`
+- the MLflow run contains the registered detector model artifacts
+
+---
+
+## SGCLI Quickstart
+
+From the repo root:
 
 ```bash
-databricks bundle run train_detector -t dev --params train_epochs=1
+sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
 ```
 
-### Step 8b (optional) — Hyperparameter sweep (Phase 2b)
+This submits the same training config to one 8xH100 machine through SGCLI and
+launches the package CLI with `torchrun`. The package CLI reads the SGCLI-written
+`$HYPERPARAMETERS_PATH`, constructs `TrainerConfig`, and runs the same
+`Trainer` core as the DAB notebook quickstart.
+
+Inspect a run:
+
+```bash
+sgcli get runs --limit 10 -p dev
+sgcli get logs <run-id> --rank 0 -p dev
+```
+
+Success criteria are the same as DAB: rank 0 logs the MLflow run, registers the
+detector model, and sets `@challenger`.
+
+---
+
+## Next Lanes
+
+### Hyperparameter sweep (Phase 2b)
 
 If the single training run plateaus (the DENTEX detector has historically hit a ~3% mAP@50
 ceiling), run the HPO sweep, which tunes the detector head **and** fine-tunes the
 C-RADIO / DINOv3 backbone:
 
 ```bash
-# 1. (recommended) audit the architecture first — anchors, positive ratio, NMS, delta clamp
-databricks bundle run train_detector -t dev   # or open notebooks/02a_arch_probe.py and run all
+# 1. (recommended) audit the architecture first - anchors, positive ratio, NMS, delta clamp
+# Open notebooks/02a_arch_probe.py and run all.
 
 # 2. launch the sweep (single driver; pick a stage)
 databricks bundle run campaign_sweep -t dev -- --params sweep_stage=dinov3_s1
 ```
 
-> See [HPO.md](HPO.md) for the full push-to-0.60 mAP campaign — the architectural fixes
+> See [HPO.md](HPO.md) for the full push-to-0.60 mAP campaign - the architectural fixes
 > (per-level anchors, per-class NMS), the winning runs, and the stage-by-stage sweep record.
 
 The sweep runs as a parent MLflow run with one nested child run per trial, sharing the same
-`Trainer` core as Step 7. It explores learning rates, `backbone_mode`
+`Trainer` core as the quickstart lanes. It explores learning rates, `backbone_mode`
 (`frozen`/`lora`/`partial`/`full`), unfreeze depth, anchor geometry, and head
 regularization. All sweep parameters are config-driven from the `SWEEP_*` block in
 `notebooks/00_config.py`:
@@ -215,19 +199,19 @@ regularization. All sweep parameters are config-driven from the `SWEEP_*` block 
 | Config knob | Default | Drives |
 |-------------|---------|--------|
 | `SWEEP_STRATEGY` | `random` | `random` sampling or full `grid` |
-| `SWEEP_MAX_TRIALS` | `12` | trial budget |
-| `SWEEP_TRIAL_EPOCHS` | `3` | epochs per trial (short, for ranking) |
-| `SWEEP_PRIMARY_METRIC` | `val_map_50` | metric `select_best` ranks on |
-| `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` → `@candidate` |
+| `SWEEP_MAX_TRIALS` | `8` | trial budget |
+| `SWEEP_TRIAL_EPOCHS` | `25` | epochs per trial (shorter than final retrain) |
+| `SWEEP_PRIMARY_METRIC` | `val/best_mAP_50` | metric `select_best` ranks on |
+| `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` -> `@challenger` |
 | `SWEEP_SEARCH_SPACE` | see config | per-knob value lists (incl. `backbone_mode`, `anchor_mode`) |
 
 Expected wall time: up to **48 hours** on `GPU_8xH100` (the job carries a 48-hour timeout).
 The winning trial is re-trained at full epochs, registered to UC, and aliased `@challenger`
 only when it clears the best-in-experiment gate; the trailing `confirm_challenger` task then
 asserts the alias landed. Promotion to `@champion` happens via the `deploy_job_detector`
-deployment job (eval → approval → cross-schema promote).
+deployment job (eval -> approval -> cross-schema promote).
 
-### Step 9 — Precompute embeddings (Phase 3)
+### Embeddings and Vector Search Lane
 
 ```bash
 databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
@@ -242,7 +226,7 @@ Wait for completion (~15-20 minutes). The Vector Search index is **not** created
 `EMBEDDINGS_VS_ENDPOINT` and `EMBEDDINGS_VS_INDEX` are both set in `00_config.py`; otherwise create
 it explicitly in the next step.
 
-### Step 9b — Create the Vector Search endpoint + index
+### Create the Vector Search endpoint + index
 
 ```bash
 databricks bundle run deploy_champion_job -t prod --only create_vector_search
@@ -253,9 +237,9 @@ This runs `04b_create_vector_search.py` (no GPU), which idempotently creates the
 (`dais26-vfm-vs`) and a DELTA_SYNC index over the embeddings table, triggers a sync, waits for the
 index to come `ONLINE`, and runs a smoke-test similarity query. The embedding dimension is **derived
 from the source table** (not hardcoded), so it stays correct for any backbone. The job fails fast
-if the embeddings table from step 9 is empty.
+if the embeddings table is empty.
 
-### Step 10 — Smoke test the detector endpoint
+### Serving Smoke Test Lane
 
 ```bash
 export DATABRICKS_HOST=<your-workspace-url>
@@ -289,7 +273,7 @@ Expected response:
 }
 ```
 
-### Step 11 — Query Vector Search
+### Vector Search Query Lane
 
 Run this in a Databricks notebook or via the SDK locally:
 
@@ -318,26 +302,15 @@ Expected: 10 results with `image_id` and `diagnosis` columns.
 ```bash
 # Create service principal first (see RUNBOOK.md)
 databricks bundle deploy -t prod
-databricks bundle run train_detector -t prod
-databricks bundle run deploy_champion_job -t prod
+databricks bundle run connect_deployment_job -t dev
+databricks bundle run connect_deployment_job -t prod
 ```
 
-The `prod` target sets `scale_to_zero: false` (minimum 1 replica always warm) and uses a service
-principal for `run_as`. See [RUNBOOK.md](RUNBOOK.md#service-principal-creation) for SP setup.
-
----
-
-## Non-AIR fallback
-
-If AIR is unavailable in your region, use the `dev_non_air` target which substitutes standard DBR ML
-GPU runtimes:
-
-```bash
-databricks bundle deploy -t dev_non_air
-databricks bundle run train_detector -t dev_non_air
-```
-
-Node type defaults: AWS `g5.12xlarge` (4x A10G), Azure `Standard_NC24ads_A100_v4`, GCP `a2-highgpu-1g`.
+The `prod` target uses a service principal for `run_as` and owns the champion
+schema/model resources. The normal production flow is triggered by a new
+`@challenger` version on the dev model: evaluation -> approval -> prod champion
+copy -> champion deployment job. See [RUNBOOK.md](RUNBOOK.md#service-principal-creation)
+for SP setup.
 
 ---
 
@@ -345,11 +318,11 @@ Node type defaults: AWS `g5.12xlarge` (4x A10G), Azure `Standard_NC24ads_A100_v4
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `bundle validate` fails with `TODO_DISCOVER_DAY1` | AIR runtime values not set | Run step 4 and update `databricks.yml` variables |
 | Training job fails in `setup` task | UC catalog or schema missing | Verify UC is enabled; check `var.catalog` value |
-| Endpoint stuck in `PENDING` for >10 min | Smoke test failure or GPU capacity issue | Check `deploy_endpoint` task logs; look for `smoke test` error; verify GPU_SMALL quota |
+| `confirm_challenger` fails | Training did not register or alias the model version | Check the `train` task logs and MLflow registration output |
+| Endpoint stuck in `PENDING` for >10 min | Smoke test failure or GPU capacity issue in the operator deploy lane | Check `deploy_endpoint` or `deploy_champion` task logs; look for `smoke test` error; verify GPU_SMALL quota |
 | Vector Search index stuck syncing | CDF not enabled on source table | Run `DESCRIBE EXTENDED ml_dev.dais26_vfm.train_embeddings` and verify `delta.enableChangeDataFeed = true` |
-| `dist/*.whl` not found during bundle deploy | Step 5 skipped | Run `uv build` before `databricks bundle deploy` |
+| `dist/*.whl` not found during bundle deploy | Build step skipped | Run `uv build` before `databricks bundle deploy` |
 | `FileNotFoundError: Could not locate pyproject.toml` at log-time | Stale wheel built before the `force-include` block was added | Re-run `uv build`; verify with `python -m zipfile -l dist/*.whl \| grep _pyproject.toml` |
 | `ModuleNotFoundError: timm` / `einops` / `open_clip` at serving | Runtime dep missing from `[tool.dais26.serving-deps].detector` | Add to that table in `pyproject.toml`; `assert_serving_reqs_match_pyproject` is the CI guard |
 | `trust_remote_code` error loading C-RADIOv4 | Transformers version mismatch | Pin `transformers>=4.48.0` in your cluster; check pyproject.toml |
@@ -362,4 +335,4 @@ Node type defaults: AWS `g5.12xlarge` (4x A10G), Azure `Standard_NC24ads_A100_v4
 | Cold-cache HF download deadlock on multi-rank run | Naive `barrier()` doesn't fix the from_pretrained race | Use `distributed.barrier_dance.rank0_first` (already wired in `models/builder.py`) — see [RUNBOOK.md#hf-cache-race](RUNBOOK.md#hf-cache-race) |
 | `BarrierTimeoutError` from `safe_barrier` | A rank crashed earlier; NCCL would have hung silently | Inspect ranks' logs in order; the bounded wait surfaces the dead-rank instead of hanging |
 | `IncompatibleArtifactError: artifact_format_version=1` at load | Loading a v1 artifact (sidecar JSONs) with the v2 manifest loader | Re-train against the current code; v1→v2 migration is one-shot, not auto-converted |
-| `@champion` alias not set after training | Smoke test failed; `@candidate` left in place | Check `deploy_endpoint` task logs; re-run or promote manually |
+| `@champion` alias not set after champion deploy | Smoke test failed; `@challenger` or `@champion_candidate` remains staged | Check deployment-job logs; re-run or promote manually |

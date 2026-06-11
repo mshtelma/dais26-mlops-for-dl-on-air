@@ -33,7 +33,7 @@ compute:
 
 max_retries: 1
 # 8h: full backbone fine-tune + longer schedules (and multi-trial sweeps that
-# reuse this workload) must not be killed mid-run on the H100 pool.
+# reuse this workload) must not be killed mid-run on the 8xH100 task.
 timeout_minutes: 480
 
 code_source:

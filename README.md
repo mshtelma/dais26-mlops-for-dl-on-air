@@ -36,31 +36,45 @@ pip install uv && uv pip install -e ".[dev]"
 databricks auth login --host <DATABRICKS_HOST>
 uv build                                       # ships pyproject.toml inside the wheel for serving-deps lookup
 databricks bundle deploy -t dev               # deploys UC + jobs (NOT endpoints)
-databricks bundle run train_detector -t dev   # trains + @challenger + endpoint via SDK + @champion
-databricks bundle run deploy_champion_job -t prod     # embeddings/index/drift live in the prod (champion) schema
+databricks bundle run train_detector -t dev   # DAB quickstart: train + register @challenger only
 ```
 
-Full 11-step sequence with smoke tests and prerequisites: [docs/README.md](docs/README.md)
+Terminal-first training alternative:
+
+```bash
+sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
+```
+
+Both quickstarts stop after the challenger model version is registered. Endpoint
+deployment, human approval, champion promotion, embeddings, Vector Search, and
+drift are separate operator lanes. Full prerequisites and lane details:
+[docs/README.md](docs/README.md).
 
 ## Two launch paths for training — **AIR-only** (no traditional ML clusters)
 
-All training runs on Databricks AI Runtime / Serverless GPU Compute. The DAB job
-itself uses **serverless notebook tasks**; the training notebook dispatches the
-actual GPU work via `serverless_gpu.@distributed` to the H100 pool. A second
-launch surface — `sgcli` — submits the same training core directly from a terminal.
+Both quickstarts train on one 8xH100 AIR machine and register `@challenger`.
+They differ only in launch mechanics:
+
+- **DAB quickstart**: `databricks bundle run train_detector -t dev` runs the
+  notebook job on `GPU_8xH100`. The notebook uses the local
+  `serverless_gpu.@distributed` helper and does **not** use `torchrun`.
+- **SGCLI quickstart**: `sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev`
+  submits from a terminal and uses `torchrun`.
 
 ### Path A — Notebook (`@distributed`)
 
 Run `notebooks/02_train_detector_air.py` interactively, or let the DAB job
-trigger it. The decorator dispatches to the serverless GPU pool:
+trigger it. The decorator uses the task's eight local H100s:
 
 ```python
 from serverless_gpu import distributed
-from dais26_dentex.train.train_detector import train_detector
+from dais26_dentex.config.trainer_config import TrainerConfig
+from dais26_dentex.train.trainer import Trainer
 
 @distributed(gpus=8, gpu_type="h100")
 def run_train():
-    return train_detector(catalog=..., schema=..., epochs=10, ...)
+    cfg = TrainerConfig(catalog=..., schema=..., epochs=10, ...)
+    return Trainer(cfg).run()
 
 results = run_train.distributed()
 run_id  = next((r for r in results if r), None)   # rank-0 only returns a value
@@ -79,10 +93,11 @@ sgcli get runs --limit 10 -p dev
 sgcli get logs <run-id> --rank 0 -p dev
 ```
 
-Both paths share **one core** — `src/dais26_dentex/train/train_detector.py` — which is
-distributed-aware (DistributedDataParallel with `find_unused_parameters=True`
-for the frozen backbone, rank-0-only MLflow + UC registration). See
-[sgcli/README.md](sgcli/README.md) for the terminal flow.
+Both paths share **one core** — `TrainerConfig` plus
+`src/dais26_dentex/train/trainer.py::Trainer` — which is distributed-aware
+(DistributedDataParallel with `find_unused_parameters=True` for the frozen
+backbone, rank-0-only MLflow + UC registration). See [sgcli/README.md](sgcli/README.md)
+for the terminal flow.
 
 ## Deployment model
 
@@ -100,7 +115,10 @@ bundle deploy -t prod
   `-- Prod-only embedding/monitoring jobs (precompute_embeddings, create_vector_search, drift_monitor)
 
 bundle run train_detector -t dev
-  setup --> train --> register @challenger --> deploy endpoint (SDK) --> smoke test --> @champion
+  setup --> train --> register @challenger --> confirm @challenger
+
+operator promotion lane
+  new @challenger --> eval --> approval --> prod champion copy --> deploy + smoke --> @champion
 ```
 
 Endpoints are never created before a model version exists. The detector pyfunc is logged via
@@ -181,8 +199,8 @@ cached in a UC Volume by `scripts/pin_model_cache.py`.
 
 | Doc | Contents |
 |-----|----------|
-| [docs/README.md](docs/README.md) | 5-minute quickstart, full 11-step CLI sequence, prerequisites, troubleshooting |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @candidate→@champion, Mosaic AI comparison |
+| [docs/README.md](docs/README.md) | DAB + SGCLI quickstarts, prerequisites, operator lanes, troubleshooting |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @challenger→@champion, Mosaic AI comparison |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Pre-demo D-1 checklist, rollback procedure, DINOv2 fallback, service principal creation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Latency and accuracy numbers (populated Phase 4) |
 | [docs/HPO.md](docs/HPO.md) | Detector HPO log: the push-to-0.60 mAP campaign, architectural fixes, and best-run record |

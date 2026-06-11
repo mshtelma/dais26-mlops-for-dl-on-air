@@ -366,7 +366,7 @@ def deploy_and_smoke_test(
             error=err,
         )
 
-    # 8. Promote @candidate -> @champion (atomic alias overwrite via MLflow)
+    # 8. Promote @challenger -> @champion (atomic alias overwrite via MLflow)
     promoted = False
     if promote_on_success:
         try:

@@ -17,14 +17,15 @@ include:
   - "resources/experiments/*.yml"
   - "resources/registered_models/*.yml"
   # NOTE: resources/serving/*.yml is intentionally NOT included.
-  # Serving endpoints are deployed via SDK in the deploy_endpoint task after training,
-  # gated on @candidate alias being set on a registered model version.
+  # Serving endpoints are deployed via SDK in explicit operator lanes after a
+  # registered @challenger / champion version exists. The train_detector
+  # quickstart only trains, registers, and confirms @challenger.
 
 # All training, embedding, and drift jobs run on Databricks AI Runtime (AIR) /
-# Serverless GPU Compute. No traditional ML clusters are defined anywhere in
-# the bundle. The training notebook uses `@distributed` from `serverless_gpu`
-# to dispatch GPU work; an alternative terminal-driven launch lives in
-# `sgcli/workload_train_detector.yaml`.
+# Serverless GPU Compute. No traditional ML clusters are defined anywhere in the
+# bundle. The DAB quickstart notebook runs on one GPU_8xH100 task and uses the
+# local `serverless_gpu.@distributed` helper; the terminal-driven SGCLI lane
+# lives in `sgcli/workload_train_detector.yaml` and uses torchrun.
 #
 # Shared config (catalog / schema / backbone / backbone_revision / table names)
 # lives in `notebooks/00_config.py`. Edit that notebook to switch environments.
