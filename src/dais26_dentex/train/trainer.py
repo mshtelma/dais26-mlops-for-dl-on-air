@@ -89,9 +89,17 @@ class Trainer:
     instantiate without a full training environment.
     """
 
-    def __init__(self, cfg: TrainerConfig) -> None:
+    def __init__(self, cfg: TrainerConfig, *, manage_process_group: bool = True) -> None:
         cfg.validate()
         self.cfg = cfg
+        # Launcher plumbing, deliberately NOT a TrainerConfig field (it would
+        # leak into to_mlflow_params and the reproducibility surface). True =
+        # this Trainer owns the PG lifecycle (single-run launches: notebook
+        # @distributed dispatch, one-shot torchrun). False = an outer driver
+        # (the in-job torchrun sweep) init'ed the PG once and reuses it across
+        # sequential Trainer runs — destroying it between trials would force a
+        # risky NCCL re-init per trial.
+        self._manage_pg = manage_process_group
         self.device: torch.device = setup_distributed()
         seed_per_rank(cfg.base_seed)
         logger.info("Trainer device=%s world_size=%d", self.device, world_size())
@@ -681,7 +689,8 @@ class Trainer:
                         }
                     self._save_and_register(info)
         finally:
-            teardown_distributed()
+            if self._manage_pg:
+                teardown_distributed()
         return self.run_id
 
     def _epoch_loop(

@@ -136,3 +136,11 @@ def test_teardown_no_op_when_not_initialized():
 
     assert not dist.is_initialized()
     du.teardown_distributed()  # should not raise
+
+
+def test_broadcast_object_identity_when_not_distributed():
+    """No process group -> broadcast_object is identity (the notebook-driver
+    path of the sweep command loop)."""
+    payload = ("trial", 3, {"lr": 1e-4})
+    assert du.broadcast_object(payload) is payload
+    assert du.broadcast_object(None) is None

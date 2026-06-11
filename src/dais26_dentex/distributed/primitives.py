@@ -125,6 +125,22 @@ def safe_barrier(timeout_seconds: float = 600.0) -> None:
         ) from e
 
 
+def broadcast_object(obj, src: int = 0):
+    """Broadcast a picklable object from `src` to all ranks; identity when
+    not distributed.
+
+    The sweep command loop (`train.sweep_runner.SweepRunner`) drives every
+    rank-coordinated step through this: rank0 decides, everyone else receives.
+    On the single-process notebook driver (no process group) it returns `obj`
+    unchanged, so the same runner code serves both launch surfaces.
+    """
+    if not dist.is_initialized():
+        return obj
+    payload = [obj if global_rank() == src else None]
+    dist.broadcast_object_list(payload, src=src)
+    return payload[0]
+
+
 def unwrap_model(model: nn.Module) -> nn.Module:
     """Strip a DistributedDataParallel / DataParallel wrapper if present."""
     return getattr(model, "module", model)
