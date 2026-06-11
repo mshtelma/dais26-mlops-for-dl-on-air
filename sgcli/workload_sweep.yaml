@@ -1,0 +1,70 @@
+experiment_name: dais26-mlops-for-dl-on-air
+run_name: dais26-mlopsfordl-hpo-sweep
+
+environment:
+  dependencies: requirements.yaml
+
+env_variables:
+  NCCL_DEBUG: "INFO"
+  PYTHONUNBUFFERED: "1"
+  TORCH_DISTRIBUTED_DEBUG: "INFO"
+  OMP_NUM_THREADS: "1"
+  # See workload_train_detector.yaml: hf_transfer breaks on UC Volume FUSE.
+  HF_HUB_ENABLE_HF_TRANSFER: "0"
+  HF_HUB_DOWNLOAD_TIMEOUT: "600"
+# Uncomment for DINOv3 stages (gated HF repo):
+# env_variables_secrets:
+#   HF_TOKEN: "dais26-secrets/hf-token"
+
+compute:
+  gpus: 8                          # one 8xH100 node, shared by all trials
+  gpu_type: h100
+
+max_retries: 0                     # a retry would re-run finished trials
+# A stage = max_trials sequential trials (trial_epochs each) + schedule
+# retrains, all inside this one allocation. 48h covers the widest stage —
+# mirrors campaign_sweep.yml's timeout_seconds. (Verify your workspace's max
+# sgcli timeout; shorten for 1-2-trial stages.)
+timeout_minutes: 2880
+
+code_source:
+  type: snapshot
+  snapshot:
+    repo_path: .                   # run from the repo root
+    allow_uncommitted: true
+    # git_commit: <40-char SHA>    # pin for reproducible campaign records
+
+# The stage carries ALL hyperparameters (config.campaigns.CAMPAIGN_STAGES —
+# the same stages 02b/campaign_sweep run); everything else here is
+# environment. Pick a stage at submit time:
+#   sgcli run -f sgcli/workload_sweep.yaml -p dev \
+#     --override parameters.stage=cradio_s2
+parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
+  stage: dinov3_s1                 # config.campaigns.CAMPAIGN_STAGES name
+  catalog: mlops_pj
+  schema: dais26_vfm
+  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw
+  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache
+  # Shared MLflow experiment (same one the notebook lane and the gates use);
+  # distinct from the workload's own top-level experiment_name. Override per
+  # user via `--override parameters.experiment_name=...`.
+  experiment_name: /Users/michael.shtelma@databricks.com/dais26_vfm_experiment
+
+command: |-
+  set -euxo pipefail
+  REPO_DIR="$HOME/dais26-mlops-for-dl-on-air"
+  if [ ! -f "$REPO_DIR/pyproject.toml" ]; then
+    REPO_DIR="$(find "$HOME" -maxdepth 2 -name pyproject.toml -printf '%h\n' 2>/dev/null | head -1)"
+  fi
+  cd "$REPO_DIR"
+  pip install .
+  GPUS_PER_NODE=8
+  NNODES=$(( WORLD_SIZE / GPUS_PER_NODE ))
+  [ "$NNODES" -lt 1 ] && NNODES=1
+  torchrun \
+    --nnodes=$NNODES \
+    --nproc_per_node=$GPUS_PER_NODE \
+    --node_rank=$NODE_RANK \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    -m dais26_dentex.train.sweep_cli
