@@ -1,19 +1,59 @@
-"""Structural tests for the two supported quickstart lanes."""
+"""Structural tests for the two supported quickstart lanes.
+
+The lanes share one source of hyperparameter truth (`config.recipes`): the
+notebook builds via `build_trainer_config(BACKBONE, ...)`, the sgcli workload
+names the same recipe in its `parameters:` block and resolves through
+`train.cli.load_config`. These tests pin that contract — workload parameters
+must stay environment-only (plus deliberate, allowlisted overrides), never a
+re-statement of hyperparameters.
+"""
 
 from __future__ import annotations
 
-import ast
-import contextlib
+from dataclasses import fields
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
+from dais26_dentex.config.recipes import DETECTOR_NAMES_BY_BACKBONE, RECIPES
+from dais26_dentex.config.trainer_config import TrainerConfig
+from dais26_dentex.train import cli
+
 REPO = Path(__file__).resolve().parents[2]
-DAB_CONFIG = REPO / "notebooks" / "00_config.py"
 DAB_TRAIN_JOB = REPO / "resources" / "jobs" / "train_detector.yml"
 DAB_TRAIN_NOTEBOOK = REPO / "notebooks" / "02_train_detector_air.py"
-SGCLI_WORKLOAD = REPO / "sgcli" / "workload_train_detector.yaml"
+SGCLI_WORKLOADS = {
+    "cradio_v4_so400m": REPO / "sgcli" / "workload_train_detector.yaml",
+    "dinov3_vitl16": REPO / "sgcli" / "workload_train_detector_dinov3.yaml",
+}
+
+# Workload parameters that are legitimately environment/launch concerns rather
+# than hyperparameters. Anything else in `parameters:` must be a TrainerConfig
+# field deliberately overriding the recipe — and the recipe-critical knobs may
+# not be silently overridden at all.
+ENV_KEYS = {
+    "recipe",
+    "catalog",
+    "schema",
+    "volume_path",
+    "cache_dir",
+    "experiment_name",
+    "model_name",
+    "backbone_revision",
+    "register_model",
+    "set_candidate_alias",
+}
+ALLOWED_OVERRIDES = {"epochs", "base_seed", "num_workers", "batch_size"}
+RECIPE_CRITICAL = {
+    "anchor_layout",
+    "nms_per_class",
+    "amp_dtype",
+    "fusion_layers",
+    "box_loss_type",
+    "backbone_mode",
+}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -29,17 +69,9 @@ def _task(tasks: list[dict[str, Any]], key: str) -> dict[str, Any]:
     return matches[0]
 
 
-def _literal_assignments(path: Path) -> dict[str, Any]:
-    tree = ast.parse(path.read_text())
-    values: dict[str, Any] = {}
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            with contextlib.suppress(ValueError):
-                values[node.targets[0].id] = ast.literal_eval(node.value)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
-            with contextlib.suppress(ValueError):
-                values[node.target.id] = ast.literal_eval(node.value)
-    return values
+# ---------------------------------------------------------------------------
+# DAB lane
+# ---------------------------------------------------------------------------
 
 
 def test_dab_quickstart_stops_after_challenger_confirmation() -> None:
@@ -61,18 +93,26 @@ def test_dab_quickstart_stops_after_challenger_confirmation() -> None:
     assert confirm["max_retries"] == 0
 
 
-def test_dab_notebook_uses_shared_trainer_without_torchrun() -> None:
+def test_dab_notebook_trains_from_the_shared_recipe_without_torchrun() -> None:
     text = DAB_TRAIN_NOTEBOOK.read_text()
 
     assert "does **not** use `torchrun`" in text
     assert "from serverless_gpu import distributed" in text
-    assert "from dais26_dentex.config.trainer_config import TrainerConfig" in text
+    assert "from dais26_dentex.config.recipes import build_trainer_config" in text
     assert "from dais26_dentex.train.trainer import Trainer" in text
     assert "Trainer(cfg).run()" in text
+    # Hand-listed hyperparameters must not creep back into the notebook.
+    assert "TRAIN_LR" not in text
+    assert "TRAIN_BATCH_SIZE" not in text
+
+
+# ---------------------------------------------------------------------------
+# sgcli lane
+# ---------------------------------------------------------------------------
 
 
 def test_sgcli_quickstart_keeps_torchrun_on_single_node_h100() -> None:
-    workload = _load_yaml(SGCLI_WORKLOAD)
+    workload = _load_yaml(SGCLI_WORKLOADS["cradio_v4_so400m"])
 
     assert workload["compute"] == {"gpus": 8, "gpu_type": "h100"}
     assert "torchrun" in workload["command"]
@@ -81,21 +121,54 @@ def test_sgcli_quickstart_keeps_torchrun_on_single_node_h100() -> None:
     assert workload["parameters"]["set_candidate_alias"] is True
 
 
-def test_sgcli_default_parameters_match_dab_quickstart_defaults() -> None:
-    config = _literal_assignments(DAB_CONFIG)
-    params = _load_yaml(SGCLI_WORKLOAD)["parameters"]
+@pytest.mark.parametrize("backbone", sorted(SGCLI_WORKLOADS))
+def test_sgcli_parameters_are_recipe_plus_environment_only(backbone: str) -> None:
+    """Every workload parameter is either an environment value, an allowlisted
+    deliberate override, or it fails this test — the duplication the old
+    value-mirror test merely guarded is now structurally impossible."""
+    params = _load_yaml(SGCLI_WORKLOADS[backbone])["parameters"]
 
-    assert params["catalog"] == config["CATALOG"]
-    assert params["schema"] == config["SCHEMA"]
-    assert params["backbone_name"] == config["BACKBONE"]
-    assert params["backbone_revision"] == config["BACKBONE_REVISION"]
-    assert params["volume_path"] == f"/Volumes/{config['CATALOG']}/{config['SCHEMA']}/{config['DENTEX_VOLUME']}"
-    assert params["cache_dir"] == f"/Volumes/{config['CATALOG']}/{config['SCHEMA']}/{config['MODEL_CACHE_VOLUME']}"
-    assert params["epochs"] == config["TRAIN_EPOCHS"]
-    assert params["lr"] == config["TRAIN_LR"]
-    assert params["batch_size"] == config["TRAIN_BATCH_SIZE"]
-    assert params["use_lora"] == config["TRAIN_USE_LORA"]
-    assert params["lora_rank"] == config["TRAIN_LORA_RANK"]
-    assert params["lora_alpha"] == config["TRAIN_LORA_ALPHA"]
-    model_name = config["_DETECTOR_NAMES_BY_BACKBONE"][config["BACKBONE"]]["model_short"]
-    assert params["model_name"] == model_name
+    assert params["recipe"] == backbone
+    assert params["recipe"] in RECIPES
+
+    trainer_fields = {f.name for f in fields(TrainerConfig)}
+    unknown = set(params) - trainer_fields - {"recipe"}
+    assert not unknown, f"parameters not understood by TrainerConfig: {unknown}"
+
+    overrides = set(params) - ENV_KEYS
+    assert overrides <= ALLOWED_OVERRIDES, (
+        f"non-allowlisted hyperparameter overrides in {SGCLI_WORKLOADS[backbone].name}: "
+        f"{overrides - ALLOWED_OVERRIDES}"
+    )
+    assert not (set(params) & RECIPE_CRITICAL), (
+        "recipe-critical knobs must come from the recipe, not the workload: "
+        f"{set(params) & RECIPE_CRITICAL}"
+    )
+
+    # The MLflow experiment must be pinned so sgcli-trained versions are
+    # visible to the sweep / deployment-job best-in-experiment gates.
+    assert params["experiment_name"].endswith("dais26_vfm_experiment")
+
+
+@pytest.mark.parametrize("backbone", sorted(SGCLI_WORKLOADS))
+def test_sgcli_parameters_resolve_through_the_shared_recipe(backbone: str, tmp_path: Path) -> None:
+    """End-to-end lane equivalence: feeding the workload's parameters block
+    through the real cli loader must yield the recipe's hyperparameters with
+    only the declared overrides applied."""
+    params = _load_yaml(SGCLI_WORKLOADS[backbone])["parameters"]
+    hp = tmp_path / "hp.yaml"
+    hp.write_text(yaml.safe_dump(params))
+
+    cfg = cli.load_config(str(hp))
+    cfg.validate()
+
+    assert cfg.backbone_name == backbone
+    assert cfg.model_name == DETECTOR_NAMES_BY_BACKBONE[backbone]["model_short"]
+    assert cfg.anchor_layout == "per_level"
+    assert cfg.nms_per_class is True
+    assert cfg.epochs == params["epochs"]  # the explicit demo override
+    # Recipe values not overridden must come through untouched.
+    recipe = RECIPES[backbone]
+    assert cfg.lr == pytest.approx(recipe["lr"])
+    assert cfg.batch_size == recipe["batch_size"]
+    assert cfg.experiment_name == params["experiment_name"]

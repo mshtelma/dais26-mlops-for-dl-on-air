@@ -55,11 +55,11 @@ def test_workload_command_uses_torchrun_module_entrypoint():
     assert "-m dais26_dentex.train.cli" in d["command"]
 
 
-def test_workload_parameters_use_internal_backbone_literal():
-    """The parameters block must use the internal Literal name, not the HF id —
-    train_detector's BackboneName Literal does not accept the HF id."""
+def test_workload_parameters_use_internal_recipe_literal():
+    """The parameters block names a recipe by the internal backbone literal,
+    not the HF id — `config.recipes.RECIPES` is keyed by the internal names."""
     d = _load(WORKLOAD)
-    assert d["parameters"]["backbone_name"] in {
+    assert d["parameters"]["recipe"] in {
         "cradio_v4_so400m",
         "dinov3_vitl16",
         "dinov2_base",

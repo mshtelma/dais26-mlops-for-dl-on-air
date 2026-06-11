@@ -4,17 +4,16 @@ Reads `$HYPERPARAMETERS_PATH` (a YAML file that sgcli writes from the workload's
 `parameters:` block), builds a `TrainerConfig`, and runs `Trainer(cfg).run()`
 directly.
 
-We deliberately do NOT round-trip through `train_detector(**cfg.to_kwargs_for_train_detector())`:
-that helper forwards only the legacy kwarg subset, which silently dropped the
-loss/optimizer/anchor/backbone knobs (`weight_decay`, `onecycle_pct_start`,
-`grad_clip_norm`, `focal_*`, `box_loss_weight`, `anchor_scales`, `aspect_ratios`,
-`backbone_mode`, `backbone_lr`). Constructing the `Trainer` from the fully-typed
-`cfg` honors every field the YAML sets.
+The YAML may name a `recipe:` (a backbone literal from `config.recipes.RECIPES`)
+— the best-known hyperparameters for that backbone are then the base, and every
+other YAML key is an explicit override on top. This is what keeps the sgcli
+workload `parameters:` block down to environment values (catalog/schema/paths/
+experiment) instead of a hand-maintained mirror of the notebook constants; both
+launch lanes consume the same recipe.
 
-The old hand-rolled `_INT_KEYS / _FLOAT_KEYS / _BOOL_KEYS / filter_to_known_kwargs /
-_coerce` lives on the dataclass now (see `config.trainer_config.TrainerConfig.from_dict`),
-so adding a new knob is a one-line change to `TrainerConfig` instead of editing
-two coercion lists plus the YAML.
+Coercion of stringly-typed YAML values lives on the dataclass
+(`TrainerConfig.from_dict`), so adding a new knob is a one-line change to
+`TrainerConfig`.
 
 Flags:
     --config <path>   Override `$HYPERPARAMETERS_PATH`. Useful for local dry-runs.
@@ -29,11 +28,38 @@ import logging
 import os
 import sys
 
+import yaml
+
+from dais26_dentex.config.recipes import RECIPES, build_trainer_config
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.distributed import is_rank0
 from dais26_dentex.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
+
+
+def load_config(yaml_path: str) -> TrainerConfig:
+    """Build a TrainerConfig from a (sgcli-written) parameters YAML.
+
+    With a `recipe:` key: start from `RECIPES[recipe]`, derive the model name,
+    and apply every remaining YAML key as an override. Without one: the YAML
+    must carry the full config (legacy behavior).
+    """
+    with open(yaml_path) as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"YAML at {yaml_path} did not produce a mapping; got {type(raw).__name__}")
+    recipe = raw.pop("recipe", None)
+    if recipe is None:
+        return TrainerConfig.from_yaml(yaml_path)
+    if recipe not in RECIPES:
+        raise ValueError(f"Unknown recipe {recipe!r}; known: {sorted(RECIPES)}")
+    try:
+        catalog = raw.pop("catalog")
+        schema = raw.pop("schema")
+    except KeyError as e:
+        raise ValueError(f"recipe-based config still requires {e.args[0]!r} in parameters") from e
+    return build_trainer_config(recipe, catalog=catalog, schema=schema, **raw)
 
 
 def _resolve_yaml_path(args_config: str | None) -> str | None:
@@ -63,8 +89,16 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Config file does not exist: %s", yaml_path)
         return 2
 
-    cfg = TrainerConfig.from_yaml(yaml_path)
+    cfg = load_config(yaml_path)
     cfg.validate()
+    if cfg.experiment_name is None:
+        logger.warning(
+            "experiment_name is not set: the training run will land in the pod's "
+            "ambient/default MLflow experiment, invisible to the sweep and "
+            "deployment-job best-in-experiment gates. Set parameters.experiment_name "
+            "in the sgcli workload (distinct from the workload's own top-level "
+            "experiment_name)."
+        )
 
     if args.dry_run:
         for k, v in cfg.to_dict().items():

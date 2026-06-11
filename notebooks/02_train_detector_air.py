@@ -2,10 +2,13 @@
 # MAGIC %md
 # MAGIC # 02 — Train Detector on AIR (multi-GPU via `@distributed`)
 # MAGIC
-# MAGIC Fine-tunes the FPN + RetinaNet head over a **frozen C-RADIOv4-SO400M** backbone on DENTEX.
-# MAGIC This is the DAB quickstart launcher: the job task runs on one `GPU_8xH100`
-# MAGIC AIR notebook environment and uses the local `serverless_gpu.@distributed`
-# MAGIC helper to use the task's eight H100s. This path does **not** use `torchrun`.
+# MAGIC Trains the FPN + RetinaNet detector over the configured backbone on DENTEX,
+# MAGIC using the backbone's **campaign-final recipe** from
+# MAGIC `dais26_dentex.config.recipes` (the same recipe the sgcli lane names in its
+# MAGIC workload YAML). This is the DAB quickstart launcher: the job task runs on one
+# MAGIC `GPU_8xH100` AIR notebook environment and uses the local
+# MAGIC `serverless_gpu.@distributed` helper to use the task's eight H100s. This path
+# MAGIC does **not** use `torchrun`.
 # MAGIC
 # MAGIC Logs to MLflow, registers the model in UC, and sets `@challenger`. Endpoint
 # MAGIC deploy, smoke test, and `@champion` promotion live in separate operator lanes.
@@ -20,10 +23,27 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
-# Hyperparameters come from notebooks/00_config.py (TRAIN_* constants).
-# Module-level constants pulled in via `%run ./00_config` capture cleanly into
-# the @distributed closure, so dbutils / spark are NOT needed on workers.
+# Hyperparameters come from the per-backbone recipe in
+# `dais26_dentex.config.recipes` — the same source the sgcli lane resolves via
+# its `recipe:` parameter — so both quickstarts train the best-known
+# (campaign-final) config. Only environment values (UC names, experiment) and
+# the explicit demo-time overrides below come from 00_config. Module-level
+# constants pulled in via `%run ./00_config` capture cleanly into the
+# @distributed closure, so dbutils / spark are NOT needed on workers.
 model_name = DETECTOR_LORA_MODEL_SHORT if TRAIN_USE_LORA else DETECTOR_MODEL_SHORT
+
+# Explicit, visible overrides on the recipe. TRAIN_EPOCHS keeps the quickstart
+# inside demo wall-time (the recipe's full schedule is 150 epochs); the LoRA
+# block is the stretch path (recipes default to the campaign-winning full
+# fine-tune).
+train_overrides: dict = {"epochs": TRAIN_EPOCHS}
+if TRAIN_USE_LORA:
+    train_overrides.update(
+        backbone_mode="lora",
+        use_lora=True,
+        lora_rank=TRAIN_LORA_RANK,
+        lora_alpha=TRAIN_LORA_ALPHA,
+    )
 
 # HF token for gated backbones (e.g. DINOv3). Read on the driver from the
 # secret scope and capture as a plain-string local so it flows into the
@@ -59,28 +79,22 @@ def run_train():
     # AIR workers don't inherit the driver's process env.
     os.environ["MLFLOW_EXPERIMENT_NAME"] = EXPERIMENT_NAME
 
-    from dais26_dentex.config.trainer_config import TrainerConfig
+    from dais26_dentex.config.recipes import build_trainer_config
     from dais26_dentex.train.trainer import Trainer
 
-    cfg = TrainerConfig(
+    cfg = build_trainer_config(
+        BACKBONE,
         catalog=CATALOG,
         schema=SCHEMA,
-        backbone_name=BACKBONE,                                        # type: ignore[arg-type]
         backbone_revision=BACKBONE_REVISION,
         volume_path=VOLUME_PATH,
         cache_dir=CACHE_DIR,
-        epochs=TRAIN_EPOCHS,
-        lr=TRAIN_LR,
-        batch_size=TRAIN_BATCH_SIZE,
-        use_lora=TRAIN_USE_LORA,
-        lora_rank=TRAIN_LORA_RANK,
-        lora_alpha=TRAIN_LORA_ALPHA,
         model_name=model_name,
         experiment_name=EXPERIMENT_NAME,
         register_model=True,
         set_candidate_alias=True,
+        **train_overrides,
     )
-    cfg.validate()
     return Trainer(cfg).run()
 
 

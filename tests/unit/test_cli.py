@@ -212,3 +212,49 @@ def test_main_does_not_print_uri_on_non_rank0(
     rc = cli.main(["--config", str(path)])
     assert rc == 0
     assert "MODEL_URI" not in capsys.readouterr().out
+
+
+# --- load_config: recipe resolution ---------------------------------------
+
+
+def test_load_config_without_recipe_is_legacy_passthrough(tmp_path: Path) -> None:
+    p = tmp_path / "hp.yaml"
+    p.write_text(yaml.safe_dump({"catalog": "c", "schema": "s", "epochs": 3}))
+    cfg = cli.load_config(str(p))
+    assert cfg.catalog == "c"
+    assert cfg.epochs == 3
+    assert cfg.anchor_layout == "absolute"  # legacy default, no recipe applied
+
+
+def test_load_config_recipe_applies_best_known_then_overrides(tmp_path: Path) -> None:
+    p = tmp_path / "hp.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "recipe": "cradio_v4_so400m",
+                "catalog": "c",
+                "schema": "s",
+                "epochs": 2,
+            }
+        )
+    )
+    cfg = cli.load_config(str(p))
+    assert cfg.backbone_name == "cradio_v4_so400m"
+    assert cfg.anchor_layout == "per_level"  # from the recipe
+    assert cfg.nms_per_class is True
+    assert cfg.epochs == 2  # explicit override wins over the recipe's 150
+    assert cfg.model_name == "cradio_detector"  # derived from the recipe
+
+
+def test_load_config_unknown_recipe_raises(tmp_path: Path) -> None:
+    p = tmp_path / "hp.yaml"
+    p.write_text(yaml.safe_dump({"recipe": "resnet50", "catalog": "c", "schema": "s"}))
+    with pytest.raises(ValueError, match="Unknown recipe"):
+        cli.load_config(str(p))
+
+
+def test_load_config_recipe_requires_catalog_and_schema(tmp_path: Path) -> None:
+    p = tmp_path / "hp.yaml"
+    p.write_text(yaml.safe_dump({"recipe": "cradio_v4_so400m", "schema": "s"}))
+    with pytest.raises(ValueError, match="catalog"):
+        cli.load_config(str(p))

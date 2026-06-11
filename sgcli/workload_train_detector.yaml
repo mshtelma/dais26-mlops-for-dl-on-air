@@ -44,26 +44,32 @@ code_source:
     allow_uncommitted: true
     # git_commit: <40-char SHA>
 
-# Parameter values mirror notebooks/00_config.py so the sgcli and notebook
-# launch surfaces train against the exact same UC objects + hyperparameters.
+# Hyperparameters come from the named recipe — the SAME source the notebook
+# quickstart uses (`dais26_dentex.config.recipes.RECIPES`), so the two launch
+# surfaces cannot drift. Everything below the recipe line is environment
+# (where to read/write) or an explicit, deliberate override. Override at submit
+# time without editing this file, e.g.:
+#   sgcli run -f sgcli/workload_train_detector.yaml -p dev \
+#     --override parameters.epochs=150 parameters.experiment_name=/Users/<you>/dais26_vfm_experiment
 parameters:                        # written by sgcli to $HYPERPARAMETERS_PATH
-  catalog: mlops_pj                # CATALOG
-  schema: dais26_vfm               # SCHEMA
-  backbone_name: cradio_v4_so400m  # BACKBONE — internal literal, NOT the HF id
-  backbone_revision: main          # BACKBONE_REVISION
-  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw   # VOLUME_PATH
-  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache    # CACHE_DIR
-  epochs: 50                       # TRAIN_EPOCHS
-  lr: 0.001                        # TRAIN_LR
-  batch_size: 8                    # TRAIN_BATCH_SIZE
-  num_workers: 4                   # train_detector default; no notebook override
-  use_lora: false                  # TRAIN_USE_LORA
-  lora_rank: 8                     # TRAIN_LORA_RANK
-  lora_alpha: 32.0                 # TRAIN_LORA_ALPHA
-  img_size: 1024                   # train_detector default; no notebook override
-  model_name: cradio_detector      # DETECTOR_MODEL_SHORT (use_lora=false branch)
+  recipe: cradio_v4_so400m         # config.recipes literal, NOT the HF id
+  catalog: mlops_pj
+  schema: dais26_vfm
+  backbone_revision: main          # pin a 40-char SHA for reproducible runs
+  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw
+  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache
+  # MLflow experiment the TRAINING RUN logs to — must match the bundle-managed
+  # experiment the notebook lane uses, or the sweep / deployment-job
+  # best-in-experiment gates will not see sgcli-trained versions. This is
+  # deliberately distinct from the workload's top-level `experiment_name`
+  # (sgcli's own run tracking). Override per user via
+  # `--override parameters.experiment_name=...`.
+  experiment_name: /Users/michael.shtelma@databricks.com/dais26_vfm_experiment
   register_model: true
   set_candidate_alias: true
+  # Demo-time override: the recipe's full schedule is 150 epochs (the
+  # dazzling-mole-850 0.5931 run); 50 keeps the quickstart inside ~2h.
+  epochs: 50
 
 command: |-
   set -euxo pipefail
