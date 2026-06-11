@@ -95,9 +95,8 @@ for ann in coco_gt["annotations"]:
         ann["area"] = float(w) * float(h)
     ann.setdefault("iscrowd", 0)
 
-_gt_tmp = tempfile.NamedTemporaryFile("w", suffix=f"_{EVAL_SPLIT}_gt.json", delete=False)
-json.dump(coco_gt, _gt_tmp)
-_gt_tmp.close()
+with tempfile.NamedTemporaryFile("w", suffix=f"_{EVAL_SPLIT}_gt.json", delete=False) as _gt_tmp:
+    json.dump(coco_gt, _gt_tmp)
 GT_PATH = _gt_tmp.name
 images_dir = Path(VOLUME_PATH) / "images" / EVAL_SPLIT
 print(f"GT: {len(coco_gt['images'])} images, {len(coco_gt['annotations'])} annotations -> {GT_PATH}")
@@ -112,7 +111,7 @@ def _load_detector(model_short: str):
         uri = f"models:/{full}@{alias}"
         try:
             return mlflow.pyfunc.load_model(uri), uri
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"  {uri}: unavailable ({type(e).__name__})")
     return None, None
 
@@ -128,10 +127,10 @@ def _inner_detection_model(loaded):
     if hasattr(loaded, "unwrap_python_model"):
         try:
             pyfunc_model = loaded.unwrap_python_model()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pyfunc_model = None
     if pyfunc_model is None:
-        pyfunc_model = loaded._model_impl.python_model  # noqa: SLF001
+        pyfunc_model = loaded._model_impl.python_model
     return pyfunc_model.model
 
 
@@ -228,7 +227,7 @@ if not grid_rows:
 # ---- Summary tables ----
 grid_df = pd.DataFrame(grid_rows)
 print(f"\n=== Full threshold grid on '{EVAL_SPLIT}' ===")
-display(grid_df.sort_values(["backbone", "mAP_50"], ascending=[True, False]))  # noqa: F821
+display(grid_df.sort_values(["backbone", "mAP_50"], ascending=[True, False]))
 
 summary = []
 for backbone, info in best_per_backbone.items():
@@ -247,7 +246,7 @@ for backbone, info in best_per_backbone.items():
     )
 summary_df = pd.DataFrame(summary).set_index("backbone")
 print("\n=== Best free thresholds per backbone (fold these into the finalize-stage config) ===")
-display(summary_df)  # noqa: F821
+display(summary_df)
 
 # COMMAND ----------
 # ---- Persist results (so they survive past the live cell outputs) ----
@@ -260,7 +259,7 @@ _payload = {
 }
 try:
     mlflow.set_experiment(EXPERIMENT_NAME)  # from 00_config
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     print(f"set_experiment skipped: {_e}")
 with mlflow.start_run(run_name="eval-threshold-grid"):
     for _bk, _info in best_per_backbone.items():
@@ -283,4 +282,4 @@ with mlflow.start_run(run_name="eval-threshold-grid"):
 
 # COMMAND ----------
 Path(GT_PATH).unlink(missing_ok=True)
-dbutils.notebook.exit(json.dumps(_payload))  # noqa: F821
+dbutils.notebook.exit(json.dumps(_payload))

@@ -170,7 +170,7 @@ if DEPLOY_ACTION == "create_vector_search":
                 try:
                     w.vector_search_indexes.get_index(index_name=VS_INDEX_NAME)
                     time.sleep(5)
-                except Exception:  # noqa: BLE001 — get_index raises once the index is gone
+                except Exception:
                     break
             _create_index(embedding_dim)
             print(f"Recreated VS index {VS_INDEX_NAME} at dim={embedding_dim}")

@@ -132,7 +132,7 @@ except Exception as e:
             try:
                 w.vector_search_indexes.get_index(index_name=VS_INDEX_NAME)
                 time.sleep(5)
-            except Exception:  # noqa: BLE001 — get_index raises once the index is gone
+            except Exception:
                 break
         _create_index(embedding_dim)
         print(f"Recreated VS index {VS_INDEX_NAME} at dim={embedding_dim}")
@@ -170,7 +170,7 @@ while time.time() < deadline:
         try:
             w.vector_search_indexes.sync_index(index_name=VS_INDEX_NAME)
             print("Triggered index sync")
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"sync trigger note: {e}")
         synced_kicked = True
     time.sleep(20)
