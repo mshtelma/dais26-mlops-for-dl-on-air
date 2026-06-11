@@ -106,11 +106,12 @@ demo. The audience needs to feel the floor before we add ceilings.
 backbone(images) -> (summary, spatial_features)
                      |          |
                      |          +-- (B, T, 1152) per-patch  -> FPN -> RetinaNet head
-                     +-- (B, 1152) pooled global -> embeddings, drift, Vector Search
+                     +-- (B, 2304) pooled global -> embeddings, drift, Vector Search
 ```
-- Same hidden dim (1152) for SO400M, but two **distinct** outputs.
+- Two **distinct** outputs with distinct dims: `spatial_features` keep the 1152 ViT hidden
+  dim; `summary` is RADIO's pooled global feature at 2304 (2×1152).
 - Everything downstream parameterizes on `backbone_info.summary_dim` /
-  `backbone_info.spatial_dim` — never hardcoded. Hardcoding 1152 anywhere outside
+  `backbone_info.spatial_dim` — never hardcoded. Hardcoding a dimension anywhere outside
   `models/backbones.py` is a bug.
 
 **Transition line:** "OK, one GPU is hard. Now let's add seven more."
@@ -242,12 +243,12 @@ before they see the code.
         |                     |                     |
    AIR @distributed     AIR @distributed       AIR scheduled
    train_detector       precompute_embeddings  drift_monitor
-   spatial_features     summary (1152)         summary (1152)
+   spatial_features     summary (2304)         summary (2304)
         |                     |                     |
         v                     v                     v
    UC model registry    Mosaic AI                Delta:
    cradio_detector      Vector Search            drift_scores
-   @candidate->@champion (HNSW+L2, dim=1152)    (alert BOOLEAN)
+   @candidate->@champion (HNSW+L2, dim=2304)    (alert BOOLEAN)
         |
         v
    Mosaic AI Model Serving GPU endpoint
@@ -358,13 +359,13 @@ top-10 plus a UMAP scatter.
    res = w.vector_search_indexes.query_index(
        index_name=VS_INDEX_NAME,                # main.mshtelma.dais26_dentex_embeddings_index
        columns=["image_id", "diagnosis", "split"],
-       query_vector=query_vec,                  # summary, dim=1152
+       query_vector=query_vec,                  # summary, dim=2304
        num_results=10,
    )
    ```
 3. Display the top-10 images. Most should share the query's diagnosis.
-4. "The embedding is `summary` — dim 1152, L2-normalized. The Vector Search index holds 1005
-   embeddings, one per DENTEX image, HNSW+L2."
+4. "The embedding is `summary` — dim 2304 (RADIO pools two reps, 2×1152), L2-normalized. The
+   Vector Search index holds 1005 embeddings, one per DENTEX image, HNSW+L2."
 5. **Same-class recall**: target `recall@10 ≥ 0.80` per `tests/integration/E7`. The notebook
    prints the live number.
 6. Switch to `03_precompute_embeddings.py` (pre-baked UMAP cell). Show the scatter plot:
@@ -375,9 +376,10 @@ top-10 plus a UMAP scatter.
    > funds two products.**"
 
 **Key slide (Slide 17):** Vector Search Delta Sync diagram.
-- Source: `dais26_dentex_train_embeddings` Delta table (CDF=on, ARRAY<FLOAT> dim=1152).
+- Source: `dais26_dentex_train_embeddings` Delta table (CDF=on, ARRAY<FLOAT> dim=2304).
 - Sync mode: `TRIGGERED` (manual or post-write).
-- Index type: `DELTA_SYNC`, embedding dim=1152, primary_key=`image_id`.
+- Index type: `DELTA_SYNC`, embedding dim=2304 (derived from the table, not hardcoded),
+  primary_key=`image_id`.
 - "Embedding pipeline is just a Delta table write — VS handles indexing, syncing, and serving."
 
 **Backup:** Switch to `seg3_similarity.mp4`.
@@ -394,7 +396,7 @@ inference table on a separate hourly job.
 
 1. Run the "demo" mode cell:
    - 25 clean val images vs. 25 synthetically shifted (contrast=0.5, gamma=2.0).
-   - Re-embed all 50 via C-RADIOv4 `summary` (dim 1152), L2-normalized.
+   - Re-embed all 50 via C-RADIOv4 `summary` (dim 2304), L2-normalized.
    - Reference embeddings come from `dais26_dentex_train_embeddings` (Delta).
    - Compute KNN distance (k=50) and bootstrap 95% CI (1000 iterations).
 2. Display the drift score bar: clean batch vs. shifted batch.
@@ -483,8 +485,8 @@ LIMIT 5;
 | Role | Backbone output | Artifact | UC location |
 |------|----------------|----------|-------------|
 | Detection head | `spatial_features` (B, T, 1152) | Mosaic AI serving endpoint | `dais26-cradio-detector-dev` |
-| Embedding service | `summary` (B, 1152) | Vector Search index + Delta table | `…dais26_dentex_embeddings_index` |
-| Drift sensor | `summary` (B, 1152) | `drift_scores` Delta table | `…dais26_dentex_drift_scores` |
+| Embedding service | `summary` (B, 2304) | Vector Search index + Delta table | `…dais26_dentex_embeddings_index` |
+| Drift sensor | `summary` (B, 2304) | `drift_scores` Delta table | `…dais26_dentex_drift_scores` |
 
 **Slide 23 — The four pains, the four wins:**
 - DL is hard → **frozen VFM + tiny head** beats full fine-tuning at this scale, in 20 min on
@@ -529,7 +531,7 @@ Common expected questions and suggested answers:
 | Slide | Content | Why critical |
 |-------|---------|-------------|
 | Slide 4 | Frozen-backbone decision | The single architectural choice that makes this tractable. |
-| Slide 5 | BackboneInfo contract | summary=1152 (pooled), spatial=1152 (per-patch). Wrong tensor → wrong artifacts. |
+| Slide 5 | BackboneInfo contract | summary=2304 (pooled, 2×1152), spatial=1152 (per-patch). Wrong tensor → wrong artifacts. |
 | Slide 7 | Failure-mode → fix table | Concrete, named code anchors. Audience leaves with grep targets. |
 | Slide 13 | System diagram | The reframe slide before the demos. If they only see one slide, this is it. |
 | Slide 19 | Two-phase deploy | Explains why endpoints are SDK-driven, not YAML. |

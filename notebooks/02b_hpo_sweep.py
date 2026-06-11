@@ -301,13 +301,28 @@ if _DO_RETRAIN:
                     return float(metric.value)
             return None
 
+        def _version_model_id(mv) -> str | None:
+            """Resolve a version's LoggedModel id.
+
+            UC does NOT populate `ModelVersion.model_id`; the LoggedModel link
+            lives in `source` as `models:/<model_id>` for versions registered the
+            MLflow 3 way (MlflowReporter.register_logged_model). Classic versions
+            (registered from a run artifact) have a `dbfs:/...` source and no link.
+            Prefer an explicit `model_id` if a future client ever sets it.
+            """
+            mid = getattr(mv, "model_id", None)
+            if mid:
+                return mid
+            src = getattr(mv, "source", "") or ""
+            return src.split("models:/", 1)[1] if src.startswith("models:/") else None
+
         prior: list[tuple[str, float]] = []
         for mv in client.search_model_versions(f"name='{full_model}'"):
             if str(mv.version) == str(winner_version):
                 continue
             # Prefer the LoggedModel metric (MLflow 3); fall back to the run metric
             # for legacy versions whose LoggedModel has no linked metric.
-            m = _logged_model_metric(getattr(mv, "model_id", None), SWEEP_PRIMARY_METRIC)
+            m = _logged_model_metric(_version_model_id(mv), SWEEP_PRIMARY_METRIC)
             if m is None and mv.run_id:
                 try:
                     m = client.get_run(mv.run_id).data.metrics.get(SWEEP_PRIMARY_METRIC)

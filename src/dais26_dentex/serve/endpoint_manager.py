@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from dais26_dentex.config.constants import ALIAS_CANDIDATE
 
@@ -88,6 +89,39 @@ def smoke_test_endpoint(
         return False, f"Smoke test exception: {e}"
 
 
+def archive_orphaned_inference_table(
+    spark: Any,
+    catalog: str,
+    schema: str,
+    prefix: str,
+) -> str | None:
+    """Rename a leftover AI Gateway payload table so a fresh endpoint can recreate it.
+
+    AI Gateway ALWAYS auto-creates ``{prefix}_payload`` on endpoint create/update and
+    refuses to reuse a pre-existing table ("Table ... already exists. Please specify a
+    different table prefix."). When a prior endpoint was torn down, its payload table is
+    orphaned (no writer) but still occupies the canonical name, hard-failing the next
+    create. This renames the orphan to ``{prefix}_payload_archived_<utc_ts>`` — preserving
+    every row — and frees the canonical name. Returns the archived table name, or None if
+    there was nothing to archive.
+
+    The caller MUST ensure the endpoint does not currently exist before calling this:
+    renaming a *live* inference table corrupts logging (per Databricks AI Gateway docs).
+    """
+    payload = f"{catalog}.{schema}.{prefix}_payload"
+    try:
+        if not spark.catalog.tableExists(payload):
+            return None
+    except Exception as e:  # noqa: BLE001 — a lookup failure just means "nothing to archive"
+        logger.warning("Could not check for orphaned inference table %s: %s", payload, e)
+        return None
+    ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+    archived = f"{catalog}.{schema}.{prefix}_payload_archived_{ts}"
+    logger.info("Archiving orphaned inference table %s -> %s", payload, archived)
+    spark.sql(f"ALTER TABLE {payload} RENAME TO {archived}")
+    return archived
+
+
 def deploy_and_smoke_test(
     endpoint_name: str,
     catalog: str,
@@ -103,6 +137,7 @@ def deploy_and_smoke_test(
     timeout_seconds: int = 5400,
     promote_on_success: bool = True,
     model_version: str | None = None,
+    spark: Any = None,
 ) -> EndpointDeployResult:
     """Resolve a version, deploy/update endpoint, smoke-test, and optionally
     promote to @champion.
@@ -155,10 +190,11 @@ def deploy_and_smoke_test(
     )
     config = EndpointCoreConfigInput(name=endpoint_name, served_entities=[served_entity])
 
-    # 4. AI Gateway top-level (NOT nested under config)
+    # 4. AI Gateway top-level (NOT nested under config). The payload-logging table
+    #    is canonically named {prefix}_payload.
+    prefix = inference_table_prefix or f"{model_name}_inference"
     ai_gateway = None
     if ai_gateway_enabled:
-        prefix = inference_table_prefix or f"{model_name}_inference"
         ai_gateway = AiGatewayConfig(
             inference_table_config=AiGatewayInferenceTableConfig(
                 catalog_name=catalog,
@@ -247,6 +283,14 @@ def deploy_and_smoke_test(
     try:
         if not _endpoint_exists():
             logger.info("Endpoint %s does not exist; creating", endpoint_name)
+            # The endpoint is absent, so any existing {prefix}_payload table is an
+            # orphan from a previously torn-down endpoint. AI Gateway always auto-
+            # creates that table on endpoint create and won't reuse an existing one,
+            # so archive (rename) the orphan first to avoid the "table already exists /
+            # specify a different table prefix" failure — without losing its rows.
+            # Only safe because no endpoint is writing to it right now.
+            if ai_gateway is not None and spark is not None:
+                archive_orphaned_inference_table(spark, catalog, schema, prefix)
             w.serving_endpoints.create_and_wait(
                 name=endpoint_name,
                 config=config,

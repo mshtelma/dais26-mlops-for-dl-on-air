@@ -14,7 +14,7 @@
 │  │              │                                                         │
 │  │ model_cache  │──┐              ┌──────────────────────────────────┐   │
 │  │ (C-RADIOv4   │  │              │ train_embeddings                 │   │
-│  │  DINOv2 bkp) │  │              │ ARRAY<FLOAT> dim=1152, CDF=on   │   │
+│  │  DINOv2 bkp) │  │              │ ARRAY<FLOAT> dim=2304, CDF=on   │   │
 │  └──────────────┘  │              └──────────────┬───────────────────┘   │
 │                     │                            │                        │
 └─────────────────────┼────────────────────────────┼────────────────────────┘
@@ -26,7 +26,7 @@
 │  AIR H100       │                    │  Mosaic AI          │
 │  DAB Job:       │                    │  Vector Search      │
 │  train_detector │                    │  embeddings_index   │
-│                 │                    │  dim=1152, HNSW+L2  │
+│                 │                    │  dim=2304, HNSW+L2  │
 │  Task 1: setup  │                    └─────────────────────┘
 │  Task 2: train  │
 │  Task 3: reg    │──── @candidate ──>┌──────────────────────────┐
@@ -36,7 +36,7 @@
 ┌─────────────────┐                   │  @candidate / @champion  │
 │  AIR H100       │                   └──────────┬───────────────┘
 │  DAB Job:       │──── summary ──>              │ numeric version
-│  precompute_    │     dim=1152                 ▼
+│  precompute_    │     dim=2304                 ▼
 │  embeddings     │              ┌───────────────────────────────────────┐
 └─────────────────┘              │  Mosaic AI Model Serving              │
                                  │  dais26-cradio-detector-{target}      │
@@ -49,7 +49,7 @@
 │                 │
 │  re-embeds via  │──── writes ──>┌──────────────────────────────┐
 │  summary dim    │               │  drift_scores Delta table    │
-│  1152           │               │  knn_distance, mmd_score,    │
+│  2304           │               │  knn_distance, mmd_score,    │
 └─────────────────┘               │  alert BOOLEAN               │
                                   └──────────────┬───────────────┘
                                                  │
@@ -76,23 +76,23 @@ summary, spatial_features = backbone(images)
 
 | Output | Shape | Dim | Used by |
 |--------|-------|-----|---------|
-| `summary` | `(B, 1152)` | 1152 | Embeddings, drift, Vector Search, EmbedderPyfunc |
+| `summary` | `(B, 2304)` | 2304 | Embeddings, drift, Vector Search, EmbedderPyfunc |
 | `spatial_features` | `(B, T, 1152)` | 1152 | FPN adapter, RetinaNet head, DetectorPyfunc |
 
 Where `T = (H / patch_size) * (W / patch_size)`. For 1024×1024 input with `patch_size=16`: `T = 64*64 = 4096`.
 
 **Critical facts:**
-- `summary` and `spatial_features` are **distinct outputs** — never interchange them. They share the SO400M ViT hidden dim (1152) but `summary` is a separately pooled global feature, not a CLS token from the patch sequence.
+- `summary` and `spatial_features` are **distinct outputs** with **distinct dims** — never interchange them. `spatial_features` keep the SO400M ViT hidden dim (1152); `summary` is RADIO's pooled global feature and is **2304** (a concatenation of two pooled reps, i.e. 2×1152), not a CLS token from the patch sequence.
 - FPN `in_channels` must be **1152** (spatial dim).
-- Vector Search index `embedding_dimension` must be **1152** (summary dim).
-- Drift KNN reference must be built from **1152**-dim vectors.
+- Vector Search index `embedding_dimension` must be **2304** (summary dim).
+- Drift KNN reference must be built from **2304**-dim vectors.
 
 ### BackboneInfo dataclass
 
 ```python
 @dataclass
 class BackboneInfo:
-    summary_dim: int        # C-RADIOv4: 1152  |  DINOv2-base: 768
+    summary_dim: int        # C-RADIOv4: 2304 (2x1152)  |  DINOv3: 1024  |  DINOv2-base: 768
     spatial_dim: int        # C-RADIOv4-SO400M: 1152  |  DINOv2-base: 768
     spatial_scale: int      # patch stride (16 for both)
     has_separate_summary: bool  # True for C-RADIOv4; False for DINOv2 (CLS token)
@@ -226,16 +226,29 @@ is the single sweep driver (parametrized by `sweep_stage`); the former standalon
    Verify-only: resolves @challenger and raises if the gate left no alias. No deploy.
 ```
 
-**LoggedModel metric linkage (MLflow 3).** The `Trainer` re-logs the best-epoch
-`val/*` metrics (plus `val/best_mAP_50` = `SWEEP_PRIMARY_METRIC`) against the
-`model_id` of the LoggedModel that `log_model` creates
+**LoggedModel metric linkage + register-from-LoggedModel (MLflow 3).** Models are
+logged **unregistered** (`log_pyfunc(registered_model_name=None)`) and then
+registered from the LoggedModel URI via `MlflowReporter.register_logged_model`
+(`mlflow.register_model("models:/<model_id>", …)`). This is deliberate: passing
+`registered_model_name=` to `log_model` registers from the **run artifact**
+(`runs:/…/model`) and strands the version with no LoggedModel link, which breaks
+both the sweep gate and the cross-schema champion `copy_model_version` (it needs
+the source version's LoggedModel link). Registering from `models:/<model_id>`
+instead preserves that lineage — the version's `source` becomes `models:/<id>`.
+
+The `Trainer` re-logs the best-epoch `val/*` metrics (plus `val/best_mAP_50` =
+`SWEEP_PRIMARY_METRIC`) against that LoggedModel's `model_id`
 (`Trainer._log_metrics_to_logged_model`), so they render on the experiment's
 **Models** tab and not just the parent run. The best-in-experiment gate in
 `02b_hpo_sweep.py` reads each prior version's metric off its LoggedModel
 (`client.get_logged_model(model_id)`) and falls back to the source run's metric
-only for legacy versions whose LoggedModel carries no linked metric. (The
-deployment job's eval task, `notebooks/10`, links its `val/*` metrics to the
-version's LoggedModel the same way.)
+only for legacy versions whose LoggedModel carries no linked metric.
+
+> Note: Unity Catalog does **not** populate `ModelVersion.model_id`; the
+> LoggedModel link lives in `source` as `models:/<model_id>`. The gate and the
+> re-log notebook resolve the id from `source` (preferring the `model_id` field if
+> a future client ever sets it). The deployment job's eval task, `notebooks/10`,
+> links its `val/*` metrics to the version's LoggedModel the same way.
 
 What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
 
@@ -271,7 +284,7 @@ manually, run `deploy_champion_job` (optionally `--only precompute_embeddings`).
 ```
 5. precompute_embeddings  (notebooks/03_precompute_embeddings.py, GPU_1xA10)
    Frozen-backbone forward pass over all 1005 DENTEX images
-   Extract summary (C-RADIOv4=1152, DINOv3=1024), L2-normalize
+   Extract summary (C-RADIOv4=2304, DINOv3=1024), L2-normalize
    Write to <prefix>train_embeddings: ARRAY<FLOAT>, CDF enabled
    (VS index auto-synced only if EMBEDDINGS_VS_* are set in 00_config)
 
@@ -552,7 +565,7 @@ tags:
 Input image (B, 3, 1024, 1024)
     │
     ▼ C-RADIOv4-SO400M (frozen, 412M params)
-    ├── summary         (B, 1152)  → used by EmbedderPyfunc, drift, VS
+    ├── summary         (B, 2304)  → used by EmbedderPyfunc, drift, VS
     └── spatial_features (B, 4096, 1152)  → used by FPN below
         │
         ▼ FPNAdapter (in_channels=1152, out_channels=256) — ~2.4M params
@@ -600,7 +613,7 @@ ml.dais26_vfm.detector_inference_*
      │
      │ drift/embeddings.py
      │ Frozen C-RADIOv4 backbone, summary output only
-     │ L2-normalize → (N, 1152) float32 array
+     │ L2-normalize → (N, 2304) float32 array
      ▼
   New embeddings
      │
@@ -756,7 +769,7 @@ table/index prefix `dais26_dentex_`, backbone `cradio_v4_so400m`. The table belo
 | Schema | `<catalog>.dais26_vfm_prod` | Prod / champion schema; created by `00_setup.py` |
 | Volume | `…/dentex_raw` | Raw DENTEX images + COCO JSON |
 | Volume | `…/model_cache` | Pinned C-RADIOv4 weights + pre-baked DINOv2 fallback |
-| Delta table | `…/train_embeddings` | `ARRAY<FLOAT>` dim=1152, CDF=true |
+| Delta table | `…/train_embeddings` | `ARRAY<FLOAT>` dim=2304 (C-RADIO summary), CDF=true |
 | Delta table | `…/drift_scores` | Hourly drift job output |
 | Delta table | `…/detector_inference_*` | Auto-created by AI Gateway on first request |
 | Registered model | `dais26_vfm/cradio_detector` (or `dinov3_detector`) | DEV; backbone-keyed name; alias `@challenger`; bundle-managed |
@@ -764,5 +777,5 @@ table/index prefix `dais26_dentex_`, backbone `cradio_v4_so400m`. The table belo
 | Serving endpoint | `dais26-detector-champion` | PROD; **single** champion endpoint; serves whatever architecture holds `@champion` |
 | Registered model | `…/cradio_embedder` | Alias: `@champion` (STRETCH) |
 | MLflow experiment | `/Users/<user>/dais26_vfm_experiment` | All training runs |
-| VS index | `…/embeddings_index` | DELTA_SYNC, dim derived from the embeddings table (1152 / 1024) |
+| VS index | `…/embeddings_index` | DELTA_SYNC, dim derived from the embeddings table (C-RADIO 2304 / DINOv3 1024) |
 | Secret scope | `dais26-secrets` | Key: `hf-token` (DINOv3 only) |

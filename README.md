@@ -4,7 +4,7 @@
 
 Databricks-native showcase for the Data + AI Summit 2026 (June 15-18, San Francisco).
 Backbone is selectable in `notebooks/00_config.py` (`BACKBONE`): NVIDIA C-RADIOv4-SO400M
-(ungated, commercial-OK, `summary`/`spatial` dim 1152) or Meta DINOv3-ViTL16 (gated,
+(ungated, commercial-OK, `spatial` dim 1152 / `summary` dim 2304) or Meta DINOv3-ViTL16 (gated,
 comparison, dim 1024). DINOv2-base (dim 768) is the emergency fallback. All dimension-dependent
 code parameterizes on `BackboneInfo` — nothing downstream hardcodes a dimension.
 Dataset: DENTEX dental X-rays (CC-BY-NC-SA 4.0, research/demo only).
@@ -22,8 +22,9 @@ Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 | `precompute_embeddings` | `summary` | Delta table + Mosaic AI Vector Search index |
 | `drift_monitor` | `summary` | KNN-distance drift detection on detector traffic |
 
-Feature dim is the backbone's `summary`/`spatial` dim (C-RADIOv4-SO400M: 1152, DINOv3-ViTL16: 1024)
-and flows from `BackboneInfo` — the Vector Search index dimension is even derived from the
+Feature dim flows from `BackboneInfo`: detection uses `spatial` (C-RADIOv4-SO400M: 1152,
+DINOv3-ViTL16: 1024); embeddings/VS/drift use `summary` (C-RADIOv4-SO400M: 2304 = 2×1152,
+DINOv3-ViTL16: 1024). The Vector Search index dimension is even derived from the
 embeddings table at index-creation time, so switching `BACKBONE` needs no doc/code edits downstream.
 
 One frozen backbone artifact in a UC Volume. Three downstream consumers. Zero backbone gradients.

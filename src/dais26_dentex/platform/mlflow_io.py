@@ -197,6 +197,49 @@ class MlflowReporter:
             kwargs["registered_model_name"] = registered_model_name
         return mlflow.pyfunc.log_model(**kwargs)
 
+    def register_logged_model(
+        self,
+        model_info: Any,
+        full_model: str,
+        *,
+        alias: str | None = ALIAS_CANDIDATE,
+    ) -> str:
+        """Register a UC version FROM the logged model, preserving its ``model_id``.
+
+        MLflow 3: registering from ``models:/<model_id>`` (the LoggedModel that
+        ``log_model`` created) links the new ``ModelVersion`` back to that
+        LoggedModel — the version carries a non-empty ``model_id``. The sweep's
+        best-in-experiment gate (it reads metrics off the LoggedModel) and the
+        cross-schema champion ``copy_model_version`` both REQUIRE that link.
+
+        Passing ``registered_model_name=`` to ``log_model`` instead registers from
+        the run artifact (``runs:/.../model``) and yields ``model_id=''`` — the
+        classic path that breaks both. Hence callers ``log_pyfunc`` unregistered
+        and register here.
+
+        Returns the new version string. Sets ``@alias`` when given; raises
+        ``AliasingError`` on a failed alias assignment so gates can't silently
+        operate on an un-aliased version.
+        """
+        model_id = getattr(model_info, "model_id", None)
+        if not model_id:
+            raise AliasingError(
+                f"Cannot register {full_model} from a logged model: model_info has no model_id "
+                f"(got {model_info!r}). The MLflow client did not create a LoggedModel."
+            )
+        uri = getattr(model_info, "model_uri", None) or f"models:/{model_id}"
+        mv = mlflow.register_model(uri, full_model)
+        version = str(mv.version)
+        logger.info("Registered %s v%s from logged model %s (model_id linked)", full_model, version, model_id)
+        if alias:
+            try:
+                client = MlflowClient(registry_uri=self.registry_uri)
+                client.set_registered_model_alias(name=full_model, alias=alias, version=version)
+                logger.info("Set @%s alias on %s v%s", alias, full_model, version)
+            except Exception as e:
+                raise AliasingError(f"Failed to set @{alias} alias on {full_model} v{version}: {e}") from e
+        return version
+
     def set_candidate_alias(
         self,
         *,

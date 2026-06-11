@@ -37,7 +37,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from dais26_dentex.config.constants import MANIFEST_FILE, MODEL_STATE_FILE
+from dais26_dentex.config.constants import ALIAS_CANDIDATE, MANIFEST_FILE, MODEL_STATE_FILE
 from dais26_dentex.config.manifest import BackboneSpec, DetectorSpec, Manifest
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.data.dataset import (
@@ -518,12 +518,17 @@ class Trainer:
             from dais26_dentex.serve import detector_pyfunc as _dp
 
             model_script = str(Path(_dp.__file__).with_name("detector_model_script.py"))
+            # Log UNREGISTERED on purpose: registering happens below from the
+            # LoggedModel URI (models:/<model_id>) so the UC version keeps its
+            # model_id link. Passing registered_model_name here would register
+            # from the run artifact and strand the version with model_id='' —
+            # see MlflowReporter.register_logged_model.
             model_info = reporter.log_pyfunc(
                 python_model=model_script,
                 artifacts=artifacts,
                 signature=signature,
                 input_example=example,
-                registered_model_name=full_model if cfg.register_model else None,
+                registered_model_name=None,
             )
 
         # MLflow 3: attach the best-epoch val metrics to the LoggedModel created
@@ -532,9 +537,12 @@ class Trainer:
         # client (no model_id, or log_metrics without model_id=) is a no-op.
         self._log_metrics_to_logged_model(model_info)
 
-        if cfg.register_model and cfg.set_candidate_alias:
-            assert self.run_id is not None, "set_candidate_alias requires an active MLflow run"
-            version = reporter.set_candidate_alias(full_model=full_model, run_id=self.run_id)
+        if cfg.register_model:
+            version = reporter.register_logged_model(
+                model_info,
+                full_model,
+                alias=ALIAS_CANDIDATE if cfg.set_candidate_alias else None,
+            )
             mlflow.log_param("registered_version", version)
 
     def _log_metrics_to_logged_model(self, model_info: Any) -> None:

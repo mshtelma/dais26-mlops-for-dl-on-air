@@ -295,7 +295,7 @@ databricks serving-endpoints get dais26-cradio-detector-prod | jq '.config.serve
 Use this if C-RADIOv4 has a breaking change or is yanked from HuggingFace before the conference.
 
 **Important:** DINOv2-base is NOT a drop-in swap. It has different dimensions:
-- `summary_dim = 768` (vs 1152 for C-RADIOv4-SO400M)
+- `summary_dim = 768` (vs 2304 for C-RADIOv4-SO400M)
 - `spatial_dim = 768` (vs 1152 for C-RADIOv4-SO400M)
 
 All downstream artifacts must be rebuilt. Budget approximately 2 hours.
@@ -337,11 +337,11 @@ databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 ```
 
 This rewrites `train_embeddings` with the champion backbone's `ARRAY<FLOAT>` vectors
-(dim follows the architecture: C-RADIOv4=1152, DINOv3=1024, DINOv2=768).
+(dim follows the architecture summary output: C-RADIOv4=2304, DINOv3=1024, DINOv2=768).
 
 ### Step 3 — Recreate the Vector Search index with `embedding_dimension=768`
 
-The existing index at dim=1152 must be dropped and recreated:
+The existing index at dim=2304 (C-RADIO summary) must be dropped and recreated:
 
 ```python
 from databricks.sdk import WorkspaceClient
@@ -431,7 +431,7 @@ print(f"@champion updated to DINOv2 version {dinov2_version}.")
 ```
 
 **Talk narrative adjustment:** Update the "BackboneInfo contract" slide to show `summary_dim=768`
-instead of 1152. The three-jobs story is identical; only the dimensions change.
+instead of 2304. The three-jobs story is identical; only the dimensions change.
 
 ---
 

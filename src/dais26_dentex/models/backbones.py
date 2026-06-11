@@ -18,6 +18,8 @@ class BackboneInfo:
 
     Different backbones return different output structures:
     - C-RADIOv4: tuple (summary, spatial_features), summary_dim != spatial_dim
+      (summary is 2304 = 2x the 1152 ViT hidden dim — RADIO concatenates two
+      pooled reps; spatial_features keep the 1152 hidden dim).
     - DINOv2: single tensor (B, T, D) where summary is just the CLS token at index 0; summary_dim == spatial_dim
     Downstream consumers (FPN, embedder, drift, VS index) must parameterize on these dims.
 
@@ -30,7 +32,10 @@ class BackboneInfo:
     """
 
     name: str
-    summary_dim: int  # C-RADIOv4-SO400M: 1152; DINOv2-base: 768
+    # C-RADIOv4-SO400M: 2304 — NVIDIA RADIO's `summary` concatenates two pooled
+    # representations (CLS + pooled), so it is 2x the ViT hidden dim (2*1152).
+    # DINOv2-base / DINOv3: 768 / 1024 (CLS token, == spatial_dim).
+    summary_dim: int
     spatial_dim: int  # C-RADIOv4-SO400M: 1152 (SO400M ViT hidden dim); DINOv2-base: 768
     patch_size: int  # C-RADIOv4: 16; DINOv2-base: 14
     model_name: str  # HuggingFace ID or torch.hub identifier
@@ -240,7 +245,8 @@ def load_backbone(
         wrapped = CRadioWrapper(model)
         info = BackboneInfo(
             name="cradio_v4_so400m",
-            summary_dim=1152,
+            # RADIO `summary` = concat of two pooled reps = 2 x 1152 hidden dim.
+            summary_dim=2304,
             spatial_dim=1152,
             patch_size=16,
             model_name="nvidia/C-RADIOv4-SO400M",
