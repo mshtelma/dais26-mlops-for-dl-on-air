@@ -1,9 +1,10 @@
 """TrainerConfig — single source of truth for training hyperparameters.
 
-Replaces the kwarg proliferation on `train_detector(...)` and the parallel
-`_INT_KEYS / _FLOAT_KEYS / _BOOL_KEYS` coercion lists in `train/cli.py`. All
-runtime knobs the user might tune live here; load-bearing string identifiers
-(artifact filenames, alias names, FPN levels) live in `config.constants`.
+All runtime knobs the user might tune live here; load-bearing string
+identifiers (artifact filenames, alias names, FPN levels) live in
+`config.constants`, and per-backbone best-known VALUES live in
+`config.recipes` (this class only defines the schema + legacy-compatible
+defaults).
 
 Pure dataclass + manual validate() — no Pydantic dependency. The whole point
 of this module is to be the *one* place a teammate goes to add a knob, so
@@ -11,12 +12,18 @@ keep it small and read-able.
 
 Usage:
 
-    cfg = TrainerConfig.from_yaml("sgcli/workload_train_detector.yaml")
+    cfg = TrainerConfig.from_yaml(os.environ["HYPERPARAMETERS_PATH"])
     cfg = TrainerConfig.from_dict(yaml.safe_load(open(path)))
     cfg = TrainerConfig(catalog="ml_dev", schema="dais26_vfm", ...)
 
     cfg.validate()                        # raises ValueError on bad combos
     mlflow.log_params(cfg.to_mlflow_params())
+
+Note `from_yaml` expects a flat mapping of field names (what sgcli writes to
+`$HYPERPARAMETERS_PATH` from the workload's `parameters:` block) — NOT the
+workload YAML itself, whose config lives nested under `parameters:`. The
+sgcli entrypoint (`train.cli.load_config`) additionally resolves a `recipe:`
+key before delegating here.
 """
 
 from __future__ import annotations
@@ -359,36 +366,6 @@ class TrainerConfig:
             v = getattr(self, f.name)
             out[f.name] = "" if v is None else str(v)
         return out
-
-    def to_kwargs_for_train_detector(self) -> dict[str, Any]:
-        """Subset of fields that the legacy `train_detector(...)` signature
-        accepts. Used during Phase 2/3 cohabitation while the legacy call
-        path still exists; Phase 3 collapses this to `vars(self)`.
-        """
-        # The legacy signature is what `train/cli.py` used to filter to;
-        # we re-create that filter here once instead of duplicating it.
-        legacy_keys = {
-            "catalog",
-            "schema",
-            "backbone_name",
-            "backbone_revision",
-            "volume_path",
-            "cache_dir",
-            "epochs",
-            "lr",
-            "batch_size",
-            "num_workers",
-            "use_lora",
-            "lora_rank",
-            "lora_alpha",
-            "experiment_name",
-            "model_name",
-            "register_model",
-            "set_candidate_alias",
-            "img_size",
-            "base_seed",
-        }
-        return {k: getattr(self, k) for k in legacy_keys}
 
     # ------------------------------------------------------------------
     # Validation

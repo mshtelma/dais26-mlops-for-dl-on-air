@@ -250,7 +250,7 @@ only for legacy versions whose LoggedModel carries no linked metric.
 > a future client ever sets it). The deployment job's eval task, `notebooks/10`,
 > links its `val/*` metrics to the version's LoggedModel the same way.
 
-What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
+What the sweep explores (per-stage `search_space` in `dais26_dentex.config.campaigns.CAMPAIGN_STAGES`):
 
 | Knob | Why it's swept |
 |------|----------------|

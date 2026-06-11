@@ -38,9 +38,11 @@ uv pip install -e ".[dev]"
 ```
 
 This installs all runtime and dev dependencies (torch, transformers, mlflow, databricks-sdk, etc.)
-in editable mode so changes to `src/dais26_dentex/` are immediately reflected. Notebook params live
-in `notebooks/00_config.py` — there are no `dbutils.widgets` and no DAB `base_parameters`; edit the
-config file before launching.
+in editable mode so changes to `src/dais26_dentex/` are immediately reflected. Environment values
+(UC names, experiment, demo-time overrides) live in `notebooks/00_config.py`; training
+hyperparameters come from the per-backbone recipes in `dais26_dentex.config.recipes` — shared with
+the sgcli lane. The only job-parameter exceptions are `sweep_stage` and `deploy_action`, which jobs
+pass as `base_parameters` so one job definition serves every campaign stage / deploy mode.
 
 **All UC names are config-driven from `notebooks/00_config.py`.** The current defaults are:
 
@@ -156,8 +158,11 @@ sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
 
 This submits the same training config to one 8xH100 machine through SGCLI and
 launches the package CLI with `torchrun`. The package CLI reads the SGCLI-written
-`$HYPERPARAMETERS_PATH`, constructs `TrainerConfig`, and runs the same
-`Trainer` core as the DAB notebook quickstart.
+`$HYPERPARAMETERS_PATH`, resolves the named `recipe:` from
+`dais26_dentex.config.recipes` (the same campaign-final hyperparameters the
+notebook lane builds from), constructs `TrainerConfig`, and runs the same
+`Trainer` core as the DAB notebook quickstart — logging into the same MLflow
+experiment.
 
 Inspect a run:
 
@@ -191,19 +196,20 @@ databricks bundle run campaign_sweep -t dev -- --params sweep_stage=dinov3_s1
 > (per-level anchors, per-class NMS), the winning runs, and the stage-by-stage sweep record.
 
 The sweep runs as a parent MLflow run with one nested child run per trial, sharing the same
-`Trainer` core as the quickstart lanes. It explores learning rates, `backbone_mode`
-(`frozen`/`lora`/`partial`/`full`), unfreeze depth, anchor geometry, and head
-regularization. All sweep parameters are config-driven from the `SWEEP_*` block in
-`notebooks/00_config.py`:
+`Trainer` core as the quickstart lanes. Stage definitions (pinned recipe, search space,
+trial budget, schedule, register flag) are typed package data in
+`dais26_dentex.config.campaigns.CAMPAIGN_STAGES` — unit-tested, importable from every
+launch surface — and one `dais26_dentex.train.sweep_runner.SweepRunner` owns the
+orchestration (trial loop, MLflow nesting, winner retrains, the `@challenger`
+best-in-experiment gate) for **both** lanes.
 
-| Config knob | Default | Drives |
-|-------------|---------|--------|
-| `SWEEP_STRATEGY` | `random` | `random` sampling or full `grid` |
-| `SWEEP_MAX_TRIALS` | `8` | trial budget |
-| `SWEEP_TRIAL_EPOCHS` | `25` | epochs per trial (shorter than final retrain) |
-| `SWEEP_PRIMARY_METRIC` | `val/best_mAP_50` | metric `select_best` ranks on |
-| `SWEEP_REGISTER_WINNER` | `True` | re-train winner for full `TRAIN_EPOCHS` -> `@challenger` |
-| `SWEEP_SEARCH_SPACE` | see config | per-knob value lists (incl. `backbone_mode`, `anchor_mode`) |
+Terminal alternative — the same stage through sgcli/torchrun, one 8xH100 allocation
+running all trials sequentially:
+
+```bash
+sgcli run -f sgcli/workload_sweep.yaml --watch -p dev \
+  --override parameters.stage=dinov3_s1
+```
 
 Expected wall time: up to **48 hours** on `GPU_8xH100` (the job carries a 48-hour timeout).
 The winning trial is re-trained at full epochs, registered to UC, and aliased `@challenger`

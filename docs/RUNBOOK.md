@@ -886,8 +886,9 @@ the single sweep driver (parametrized by `sweep_stage`); the former `hpo_sweep` 
 has been folded into it, and a trailing `confirm_challenger` task asserts the
 best-in-experiment gate set the `@challenger` alias.
 
-Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in
-`SWEEP_SEARCH_SPACE`, the sgcli yaml, or `00_config.py`):
+Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in a
+stage's `search_space`/`pinned` in `config/campaigns.py`, as a recipe value in
+`config/recipes.py`, or as an sgcli workload parameter override):
 
 | Knob | Values | Effect |
 |------|--------|--------|

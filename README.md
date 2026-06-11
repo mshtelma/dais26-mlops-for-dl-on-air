@@ -69,12 +69,13 @@ trigger it. The decorator uses the task's eight local H100s:
 
 ```python
 from serverless_gpu import distributed
-from dais26_dentex.config.trainer_config import TrainerConfig
+from dais26_dentex.config.recipes import build_trainer_config
 from dais26_dentex.train.trainer import Trainer
 
 @distributed(gpus=8, gpu_type="h100")
 def run_train():
-    cfg = TrainerConfig(catalog=..., schema=..., epochs=10, ...)
+    # campaign-final recipe + environment + explicit demo-time overrides
+    cfg = build_trainer_config(BACKBONE, catalog=..., schema=..., epochs=TRAIN_EPOCHS)
     return Trainer(cfg).run()
 
 results = run_train.distributed()
@@ -94,11 +95,23 @@ sgcli get runs --limit 10 -p dev
 sgcli get logs <run-id> --rank 0 -p dev
 ```
 
-Both paths share **one core** — `TrainerConfig` plus
-`src/dais26_dentex/train/trainer.py::Trainer` — which is distributed-aware
-(DistributedDataParallel with `find_unused_parameters=True` for the frozen
-backbone, rank-0-only MLflow + UC registration). See [sgcli/README.md](sgcli/README.md)
-for the terminal flow.
+Both paths share **one core and one config source**: hyperparameters come from
+the per-backbone recipe in `config/recipes.py` (the workload YAML just names it
+— `recipe: cradio_v4_so400m` — plus environment values), and execution is
+`src/dais26_dentex/train/trainer.py::Trainer`, which is distributed-aware
+(DDP, rank-0-only MLflow + UC registration) under both `@distributed` and
+`torchrun`. Both lanes log to the same MLflow experiment, so the promotion
+gates treat their runs identically. See [sgcli/README.md](sgcli/README.md).
+
+### HP sweeps run on both paths too
+
+The HPO campaign stages (`config/campaigns.py`) execute through one
+`SweepRunner` (`train/sweep_runner.py`) from either lane:
+
+```bash
+databricks bundle run campaign_sweep -t dev -- --params sweep_stage=cradio_s2   # DAB
+sgcli run -f sgcli/workload_sweep.yaml -p dev --override parameters.stage=cradio_s2   # terminal
+```
 
 ## Deployment model
 
@@ -150,7 +163,7 @@ dais26-mlops-for-dl-on-air/
 |-- Makefile                # Developer shortcuts
 |-- src/
 |   `-- dais26_dentex/      # Importable Python package (src layout)
-|       |-- config/         # constants, manifest v2, TrainerConfig dataclass
+|       |-- config/         # constants, manifest v2, TrainerConfig schema, recipes (per-backbone best-known), campaigns (HPO stages)
 |       |-- data/           # dentex_loader.py, dataset.py, transforms.py
 |       |-- distributed/    # primitives (setup/safe_barrier/seed), barrier_dance (rank0_first)
 |       |-- drift/          # embeddings.py, reference.py, monitor.py, inference_table_reader.py
@@ -158,10 +171,10 @@ dais26-mlops-for-dl-on-air/
 |       |-- models/         # backbones (BackboneInfo), adapters (FPN), detection_head, builder, targets
 |       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
 |       |-- serve/          # detector_pyfunc.py, detector_model_script.py (models-from-code loader), embedder_pyfunc.py, postprocess.py, endpoint_manager.py
-|       `-- train/          # trainer.py (Trainer class), losses, train_detector (thin shim), cli (sgcli entry)
-|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; widget-free, params via 00_config.py
+|       `-- train/          # trainer.py (Trainer class), losses, sweep + sweep_runner (HPO brain), cli + sweep_cli (sgcli entries)
+|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; env values via 00_config.py, hyperparameters via config/recipes.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
-|-- sgcli/                  # Serverless GPU CLI workload (terminal launch path)
+|-- sgcli/                  # Serverless GPU CLI workloads (terminal train + sweep lanes)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
 |-- tests/                  # unit/ and integration/ pytest suites
 `-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK, HPO
@@ -172,14 +185,16 @@ dais26-mlops-for-dl-on-air/
 | Concern | Where it lives | Why |
 |---|---|---|
 | Artifact contract | `config/manifest.py` (v2 `manifest.json`) | Single file replaces v1's three sidecar JSONs; `version` first → `head -1` triages a model. |
-| Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass; same instance feeds the notebook `@distributed` path and the sgcli/torchrun YAML. |
+| Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass schema; same instance feeds the notebook `@distributed` path and the sgcli/torchrun YAML. Defaults stay legacy-compatible — best-known VALUES live in recipes. |
+| Per-backbone recipes | `config/recipes.py` (`RECIPES`, `build_trainer_config`) | One source of campaign-final hyperparameters; the notebook builds from it and the sgcli workloads name it (`recipe:`), so the lanes cannot drift. |
+| HPO campaign | `config/campaigns.py` (`CAMPAIGN_STAGES`) + `train/sweep_runner.py` (`SweepRunner`) | Typed, validated stages + one sweep brain (parent run, trials, retrains, challenger gate) behind two launchers: notebook 02b (`@distributed`) and `train/sweep_cli.py` (torchrun via `sgcli/workload_sweep.yaml`). |
 | Distributed primitives | `distributed/primitives.py` + `distributed/barrier_dance.py` | `safe_barrier` surfaces dead-rank deadlocks as `BarrierTimeoutError` instead of hanging on NCCL. `rank0_first` is sequence-matched and avoids the cold-cache HF download race. |
 | HF env hardening | `platform/hf_env.py::configure_hf_env` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` (UC Volume FUSE rejects parallel chunked writes). |
 | Pyfunc serving deps | `pyproject.toml::[tool.dais26.serving-deps]` ↔ `platform/mlflow_io.py::serving_pip_requirements` | One edit to add a runtime dep; the wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` so the lookup works in AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. `torch`/`torchvision` are pinned to the cu124 build (`2.6.0` / `0.21.0`) so GPU_SMALL (T4, driver CUDA 12.4) does not silently fall back to CPU. |
 | Pyfunc serving load path | `serve/detector_model_script.py` + `platform/mlflow_io.py::_default_code_paths` | Detector logged via **models-from-code** (script, not pickled instance) with the package bundled via `code_paths`. Avoids `ModuleNotFoundError: transformers_modules` (dynamic `trust_remote_code` class) and `ModuleNotFoundError: dais26_dentex` at serving. Backbone loads strictly offline (`local_files_only`) from the bundled HF cache; `torch.compile` is disabled at serving. |
 | MLflow API drift | `platform/mlflow_io.py::_log_model_artifact_kwarg` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature`. |
 | UC identifiers | `platform/uc.py::UCName`, `VolumePath` | Stop hand-rolling `f"{catalog}.{schema}.{name}"`; UC ident regex catches dotted-catalog typos. |
-| Notebook params | `notebooks/00_config.py` | All params live there; **no `dbutils.widgets`** and no DAB `base_parameters`. |
+| Notebook params | `notebooks/00_config.py` | Environment values (UC names, experiment, demo-time overrides) live there; hyperparameters come from `config/recipes.py`. Two deliberate job-parameter exceptions — `sweep_stage` (campaign_sweep) and `deploy_action` (confirm_challenger) — ride DAB `base_parameters` into notebook widgets so one job definition serves every stage/mode. |
 
 Full rationale (race traces, alternatives considered, follow-ups) in
 [docs/RUNBOOK.md#engineering-rationale](docs/RUNBOOK.md#engineering-rationale).

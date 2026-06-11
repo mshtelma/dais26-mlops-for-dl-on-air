@@ -1,4 +1,4 @@
-.PHONY: install lint test test-integration bundle-validate bundle-deploy-dev bundle-run-train bundle-run-embeddings bundle-run-drift warmup pin-cache build help
+.PHONY: install lint test test-integration bundle-validate bundle-deploy-dev bundle-run-train bundle-run-embeddings bundle-run-drift warmup pin-cache discover build help
 
 install:                           ## Install project in editable mode with dev deps
 	uv pip install -e ".[dev]"

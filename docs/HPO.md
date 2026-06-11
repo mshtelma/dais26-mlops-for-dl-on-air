@@ -1,5 +1,11 @@
 # HPO log — DENTEX detector
 
+> Stage definitions now live as typed package data in
+> `dais26_dentex.config.campaigns.CAMPAIGN_STAGES` (validated by unit tests);
+> the best-known final recipes are `dais26_dentex.config.recipes.RECIPES`.
+> Launch any stage via the DAB `campaign_sweep` job or
+> `sgcli/workload_sweep.yaml` — both run `train.sweep_runner.SweepRunner`.
+
 Running log of the detector's hyperparameter-optimization journey on the DENTEX
 diagnosis task (4 classes: Caries, Deep Caries, Periapical Lesion, Impacted; 705/50/250
 train/val/test). Metric is COCO `val/mAP_50` on the 50-image val split, as logged by the
@@ -224,8 +230,9 @@ may move, so the winner is retrained at **both 50 and `TRAIN_EPOCHS_LONG=100` ep
 the better by `val/best_mAP_50`. This is safe against overfitting: the `Trainer` already tracks the
 best checkpoint, so a 100-epoch run that peaks earlier still reports (and registers) its peak rather
 than the over-trained final epoch. Only one extra full-length run is added — the cheap trials are
-unchanged. (Wired via `TRAIN_EPOCHS_LONG` in `notebooks/00_config.py` and a second winner retrain in
-`notebooks/02b_hpo_sweep.py`; applies to the next sweep, not the in-flight run.)
+unchanged. (Historical wiring: `TRAIN_EPOCHS_LONG` in the then-monolithic `00_config.py`; today the
+schedule arm is `schedule_epochs` on the stage in `config/campaigns.py`, executed by
+`train/sweep_runner.py`. Applied to the next sweep, not the in-flight run.)
 
 **Acceptance:** beat **0.335** ✅ → **≥ 0.45** MUST-SHIP ✅ (**0.519** re-eval, [BENCHMARKS.md](BENCHMARKS.md))
 → **~0.60** stretch (RetinaNet-parity) — *remaining headroom ~0.08*. Per-class confirmed via

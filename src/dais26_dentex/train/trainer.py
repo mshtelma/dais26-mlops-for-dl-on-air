@@ -1,10 +1,11 @@
 """`Trainer` class — owns the train + validate + checkpoint + register loop.
 
-Replaces the 360-line procedural body of `train_detector(...)`. The thin
-orchestrator at `train_detector.py` now constructs a `TrainerConfig` and
-delegates here.
+The single training core behind every launch surface: the notebook
+`@distributed` closure (02 / 02b), the sgcli/torchrun CLIs (`train.cli`,
+`train.sweep_cli`), and tests all construct a `TrainerConfig` and call
+`Trainer(cfg).run()`.
 
-Key correctness fixes vs. the legacy:
+Key correctness fixes vs. the legacy procedural implementation:
   * `_build_targets` smoke stub → IoU-based matcher (`models.targets`)
   * cls-only loss → `detection_loss` (focal cls + smooth-L1 box)
   * hardcoded `num_classes=4` → `resolve_num_classes(cfg)`
@@ -73,12 +74,6 @@ from dais26_dentex.serve.detector_pyfunc import build_signature_and_example
 from dais26_dentex.train.losses import detection_loss
 
 logger = logging.getLogger(__name__)
-
-
-# Re-exported for callers that import these symbols from this module.
-# Note: the canonical `__all__` is at module bottom — this earlier one is
-# a documentation breadcrumb only and is overwritten before import-time
-# settles.
 
 
 class Trainer:

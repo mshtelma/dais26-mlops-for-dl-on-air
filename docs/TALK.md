@@ -292,10 +292,13 @@ Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10
 **Notebook:** `notebooks/02_train_detector_air.py`
 
 1. Open `notebooks/00_config.py` first. Call out:
-   - `CATALOG = "main"`, `SCHEMA = "mshtelma"`, `BACKBONE = "cradio_v4_so400m"`.
-   - `TRAIN_EPOCHS = 10`, `TRAIN_GPUS = 8`, `TRAIN_GPU_TYPE = "h100"`.
-   - "**No widgets, no DAB `base_parameters`** — every parameter lives in this one config file.
-     Edit here to switch environments. The notebook and sgcli read the same values."
+   - `CATALOG = "mlops_pj"`, `SCHEMA = "dais26_vfm"`, `BACKBONE = "cradio_v4_so400m"`.
+   - `TRAIN_EPOCHS = 50` (demo override; the recipe's full schedule is 150),
+     `TRAIN_GPUS = 8`, `TRAIN_GPU_TYPE = "h100"`.
+   - "This file is ENVIRONMENT only — catalog, schema, experiment, demo overrides.
+     The hyperparameters live in one place, `config/recipes.py`: the campaign-final
+     recipe per backbone. The notebook builds from it; the sgcli workload names it.
+     Neither lane can drift from the other."
 
 2. Switch to `02_train_detector_air.py`. Walk through the four cells:
    - `%pip install --quiet ..` + `dbutils.library.restartPython()`.
@@ -309,19 +312,23 @@ Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10
 
 3. Start training. MLflow autolog shows loss per batch.
 4. Talk over the training loop while epochs run:
-   - "Backbone is frozen. Only the FPN adapter (`in_channels = backbone_info.spatial_dim`) and
-     the RetinaNet head are training."
+   - "The recipe fine-tunes the full backbone at a discriminative LR (`backbone_lr=1e-5`
+     vs head `2e-4`) — the campaign proved full FT beats frozen/LoRA here. The FPN adapter
+     (`in_channels = backbone_info.spatial_dim`) and RetinaNet head train at the head LR."
    - "FPN takes `spatial_features` (B, T, 1152), reshapes to (B, 1152, 64, 64), produces P3-P6
      feature maps."
    - "RetinaNet — focal loss (alpha=0.25, gamma=2.0) for class imbalance, smooth-L1 for box
      regression, NMS at 0.5."
    - "There's one training core: `Trainer` in `src/dais26_dentex/train/trainer.py`. The notebook
      dispatches it via `serverless_gpu.@distributed`. **sgcli runs the same core via
-     torchrun** — `sgcli/workload_train_detector.yaml` passes the same `TrainerConfig`
-     dataclass through `$HYPERPARAMETERS_PATH`. Two surfaces, one core, one config."
+     torchrun** — `sgcli/workload_train_detector.yaml` just says `recipe: cradio_v4_so400m`
+     plus environment values; the CLI resolves the identical recipe through
+     `$HYPERPARAMETERS_PATH`. Two surfaces, one core, one recipe. Even the HPO sweep runs
+     on both: `campaign_sweep` (DAB) and `workload_sweep.yaml` (terminal) drive the same
+     `SweepRunner`."
 5. After 2 epochs: switch to the pre-baked MLflow run (epochs 3-10 pre-logged).
 6. Show the val/mAP@50 curve. Target: ≥ 0.45 after 10 epochs.
-7. Show the UC model registration: `main.mshtelma.cradio_detector`, `@candidate` alias.
+7. Show the UC model registration: `mlops_pj.dais26_vfm.cradio_detector`, `@challenger` alias.
 8. Call out the rank-0-only MLflow logic in `Trainer._save_and_register`: only rank 0 logs the
    pyfunc, sets the alias, and returns the run_id. All other ranks return `None`. The
    `serving_pip_requirements` it logs comes from `[tool.dais26.serving-deps]` in

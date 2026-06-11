@@ -59,9 +59,10 @@ def test_train_no_data_runs_config_only(monkeypatch, tmp_path: Path):
 
     monkeypatch.setattr(tracking, "MlflowClient", FakeClient)
 
-    from dais26_dentex.train.train_detector import train_detector
+    from dais26_dentex.config.trainer_config import TrainerConfig
+    from dais26_dentex.train.trainer import Trainer
 
-    run_id = train_detector(
+    cfg = TrainerConfig(
         catalog="dev_cat",
         schema="dev_schema",
         volume_path=None,  # no data
@@ -71,6 +72,7 @@ def test_train_no_data_runs_config_only(monkeypatch, tmp_path: Path):
         register_model=False,
         set_candidate_alias=False,
     )
+    run_id = Trainer(cfg).run()
     assert isinstance(run_id, str) and len(run_id) > 0
 
 
