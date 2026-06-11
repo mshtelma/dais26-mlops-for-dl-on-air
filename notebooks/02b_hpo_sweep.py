@@ -3,7 +3,7 @@
 # MAGIC # 02b — Detector HPO sweep (sequential `@distributed` AIR trials)
 # MAGIC
 # MAGIC Thin launcher over `dais26_dentex.train.sweep_runner.SweepRunner` — the same
-# MAGIC sweep brain the terminal lane runs via `sgcli/workload_sweep.yaml`. This
+# MAGIC sweep brain the terminal lane runs via `air/workload_sweep.yaml`. This
 # MAGIC notebook owns only the lane-specific part: each trial is dispatched as one
 # MAGIC `serverless_gpu.@distributed` 8xH100 job.
 # MAGIC

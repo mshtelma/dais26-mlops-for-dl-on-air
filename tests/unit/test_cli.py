@@ -110,6 +110,48 @@ def test_main_dry_run_does_not_invoke_trainer(tmp_path: Path, monkeypatch: pytes
     assert called["yes"] is False
 
 
+# --- main: ambient MLFLOW_RUN_ID guard -----------------------------------
+# `air` exports MLFLOW_RUN_ID for the workload's OWN run. Left in place, the
+# Trainer's mlflow.start_run() would attach the training run to that workload
+# run instead of the configured experiment — invisible to the gates. The guard
+# runs before the dry-run early return, so --dry-run exercises it without
+# touching GPUs.
+
+
+def test_main_clears_ambient_mlflow_run_id_when_experiment_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "recipe": "cradio_v4_so400m",
+                "catalog": "c",
+                "schema": "s",
+                "experiment_name": "/Users/x/dais26_vfm_experiment",
+            }
+        )
+    )
+    monkeypatch.setenv("MLFLOW_RUN_ID", "workload-run-abc")
+    rc = cli.main(["--config", str(path), "--dry-run"])
+    assert rc == 0
+    assert "MLFLOW_RUN_ID" not in os.environ
+
+
+def test_main_keeps_ambient_mlflow_run_id_when_experiment_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no experiment_name the run lands in the ambient experiment anyway;
+    the guard deliberately leaves MLFLOW_RUN_ID so the run attaches to the
+    workload's own run rather than spawning a stray default-experiment run."""
+    path = tmp_path / "p.yaml"
+    path.write_text(yaml.safe_dump({"catalog": "c", "schema": "s"}))
+    monkeypatch.setenv("MLFLOW_RUN_ID", "workload-run-abc")
+    rc = cli.main(["--config", str(path), "--dry-run"])
+    assert rc == 0
+    assert os.environ.get("MLFLOW_RUN_ID") == "workload-run-abc"
+
+
 # --- main: end-to-end dispatch ------------------------------------------
 
 

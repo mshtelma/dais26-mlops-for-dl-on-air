@@ -4,7 +4,7 @@
 # MAGIC
 # MAGIC Trains the FPN + RetinaNet detector over the configured backbone on DENTEX,
 # MAGIC using the backbone's **campaign-final recipe** from
-# MAGIC `dais26_dentex.config.recipes` (the same recipe the sgcli lane names in its
+# MAGIC `dais26_dentex.config.recipes` (the same recipe the air lane names in its
 # MAGIC workload YAML). This is the DAB quickstart launcher: the job task runs on one
 # MAGIC `GPU_8xH100` AIR notebook environment and uses the local
 # MAGIC `serverless_gpu.@distributed` helper to use the task's eight H100s. This path
@@ -24,7 +24,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 # Hyperparameters come from the per-backbone recipe in
-# `dais26_dentex.config.recipes` — the same source the sgcli lane resolves via
+# `dais26_dentex.config.recipes` — the same source the air lane resolves via
 # its `recipe:` parameter — so both quickstarts train the best-known
 # (campaign-final) config. Only environment values (UC names, experiment) and
 # the explicit demo-time overrides below come from 00_config. Module-level

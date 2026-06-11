@@ -861,9 +861,9 @@ torch falls back to CPU instead of erroring.
 on PyPI and initialize cleanly on the 12.4 driver. Re-validate with
 `scripts/probe_endpoint_gpu.py` if you bump the versions.
 
-### sgcli launch troubleshooting {#sgcli-launch}
+### AIR CLI launch troubleshooting {#air-launch}
 
-The terminal launch path (`sgcli/workload_train_detector.yaml`) snapshots
+The terminal launch path (`air/workload_train_detector.yaml`) snapshots
 the repo, runs `pip install .`, then `torchrun --nproc_per_node=$GPUS_PER_NODE
 -m dais26_dentex.train.cli`. The `cli` entrypoint reads
 `$HYPERPARAMETERS_PATH` (or `--config`), builds a `TrainerConfig`, and
@@ -871,10 +871,10 @@ dispatches to `Trainer.run()`. Common failures:
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `MODEL_URI=` missing from rank 0 stdout | Training succeeded on non-rank-0 ranks, rank 0 crashed in `_save_and_register` | Inspect rank-0 logs (`sgcli get logs <run-id> --rank 0`); MlflowReporter raises typed `AliasingError` instead of swallowing |
-| `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `sgcli`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
-| Hyperparameters from yaml ignored | yaml top-level shape mismatch | The sgcli yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
-| `experiment_name` from yaml clashes with `EXPERIMENT_NAME` from `notebooks/00_config.py` | Both surfaces define their own naming — intentional | Keep them independent; they target different runs (sgcli vs. notebook) |
+| `MODEL_URI=` missing from rank 0 stdout | Training succeeded on non-rank-0 ranks, rank 0 crashed in `_save_and_register` | Inspect rank-0 logs (`air logs <run-id>`); MlflowReporter raises typed `AliasingError` instead of swallowing |
+| `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `air`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
+| Hyperparameters from yaml ignored | yaml top-level shape mismatch | The air workload yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
+| Top-level `experiment_name` in the workload yaml differs from `EXPERIMENT_NAME` in `notebooks/00_config.py` | Intentional — the workload's own tracking vs. the training run's experiment | Keep the top-level name independent; `parameters.experiment_name` is what aligns the TRAINING run into the shared experiment |
 
 ### Hyperparameter sweep + backbone fine-tuning {#hpo-sweep}
 
@@ -888,7 +888,7 @@ best-in-experiment gate set the `@challenger` alias.
 
 Backbone fine-tuning is controlled by three `TrainerConfig` knobs (settable in a
 stage's `search_space`/`pinned` in `config/campaigns.py`, as a recipe value in
-`config/recipes.py`, or as an sgcli workload parameter override):
+`config/recipes.py`, or as an air workload parameter override):
 
 | Knob | Values | Effect |
 |------|--------|--------|
@@ -902,5 +902,5 @@ stage's `search_space`/`pinned` in `config/campaigns.py`, as a recipe value in
 | Loss diverges immediately when fine-tuning the backbone | `backbone_lr` too high → catastrophic forgetting of the VFM | Keep `backbone_lr` ≈ 1e-5 (10–100× below the head `lr`); the discriminative param groups exist for exactly this |
 | DDP `find_unused_parameters` error | `backbone_mode=full` expects every param to get a grad | Trainer sets `find_unused_parameters=False` only for `full`; for `frozen`/`lora`/`partial` it stays `True` |
 | Fine-tuned weights don't survive serving | backbone weights stripped at load for frozen/LoRA artifacts | The manifest records `backbone.trained_mode`; `detector_pyfunc` keeps the full backbone state only when it is `full`/`partial`. Re-train so the manifest is written by current code |
-| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `campaign_sweep` carries a 48-hour timeout (`timeout_seconds: 172800`); `train_detector` an 8-hour one; sgcli workloads use `timeout_minutes: 480` |
+| Sweep job times out | default job timeout too short for multi-trial + winner re-train | `campaign_sweep` carries a 48-hour timeout (`timeout_seconds: 172800`); `train_detector` an 8-hour one; air workloads use `timeout_minutes: 480` |
 | Anchor changes have no effect | `anchor_scales`/`aspect_ratios` left unset | `build_detector` only overrides the FPN defaults when both are set; the sweep's `anchor_mode` maps presets onto these fields |

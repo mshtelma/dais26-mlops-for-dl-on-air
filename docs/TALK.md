@@ -147,7 +147,7 @@ linear cost increase — it's a step-function in failure modes. No demo; this is
 | Cold-cache HF race | `distributed/barrier_dance.py::rank0_first` — sequence-matched; non-rank-0 hits its barrier first, rank 0 downloads, then both proceed. |
 | Env propagation to workers | `platform/hf_env.py::configure_hf_env` — one canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1`, called at the top of every worker entry. |
 | DDP frozen-param deadlock | `train/trainer.py` — `find_unused_parameters=True` in the DDP wrap. |
-| Three launch surfaces, one truth | `config/trainer_config.py::TrainerConfig` — frozen dataclass; same instance feeds notebook `@distributed` AND sgcli/torchrun. |
+| Three launch surfaces, one truth | `config/trainer_config.py::TrainerConfig` — frozen dataclass; same instance feeds notebook `@distributed` AND air/torchrun. |
 
 **Slide 8 — The launcher you don't have to write:**
 - AIR's `serverless_gpu.@distributed` decorator handles cluster bring-up, NCCL bootstrapping,
@@ -286,7 +286,7 @@ databricks bundle run train_detector -t dev   # Phase 2: train -> @candidate ->
 
 ### 0:18 – 0:25 | Live demo 1: detection fine-tune on AIR
 
-**Goal:** Show training on AIR H100. Demonstrate `@distributed`, MLflow autolog, sgcli parity.
+**Goal:** Show training on AIR H100. Demonstrate `@distributed`, MLflow autolog, air-lane parity.
 Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10.
 
 **Notebook:** `notebooks/02_train_detector_air.py`
@@ -297,7 +297,7 @@ Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10
      `TRAIN_GPUS = 8`, `TRAIN_GPU_TYPE = "h100"`.
    - "This file is ENVIRONMENT only — catalog, schema, experiment, demo overrides.
      The hyperparameters live in one place, `config/recipes.py`: the campaign-final
-     recipe per backbone. The notebook builds from it; the sgcli workload names it.
+     recipe per backbone. The notebook builds from it; the air workload names it.
      Neither lane can drift from the other."
 
 2. Switch to `02_train_detector_air.py`. Walk through the four cells:
@@ -320,8 +320,8 @@ Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10
    - "RetinaNet — focal loss (alpha=0.25, gamma=2.0) for class imbalance, smooth-L1 for box
      regression, NMS at 0.5."
    - "There's one training core: `Trainer` in `src/dais26_dentex/train/trainer.py`. The notebook
-     dispatches it via `serverless_gpu.@distributed`. **sgcli runs the same core via
-     torchrun** — `sgcli/workload_train_detector.yaml` just says `recipe: cradio_v4_so400m`
+     dispatches it via `serverless_gpu.@distributed`. **the AIR CLI runs the same core via
+     torchrun** — `air/workload_train_detector.yaml` just says `recipe: cradio_v4_so400m`
      plus environment values; the CLI resolves the identical recipe through
      `$HYPERPARAMETERS_PATH`. Two surfaces, one core, one recipe. Even the HPO sweep runs
      on both: `campaign_sweep` (DAB) and `workload_sweep.yaml` (terminal) drive the same

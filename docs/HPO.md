@@ -4,7 +4,7 @@
 > `dais26_dentex.config.campaigns.CAMPAIGN_STAGES` (validated by unit tests);
 > the best-known final recipes are `dais26_dentex.config.recipes.RECIPES`.
 > Launch any stage via the DAB `campaign_sweep` job or
-> `sgcli/workload_sweep.yaml` — both run `train.sweep_runner.SweepRunner`.
+> `air/workload_sweep.yaml` — both run `train.sweep_runner.SweepRunner`.
 
 Running log of the detector's hyperparameter-optimization journey on the DENTEX
 diagnosis task (4 classes: Caries, Deep Caries, Periapical Lesion, Impacted; 705/50/250

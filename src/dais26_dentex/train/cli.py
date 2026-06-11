@@ -1,12 +1,12 @@
-"""sgcli / torchrun entrypoint for `train_detector`.
+"""air / torchrun entrypoint for `train_detector`.
 
-Reads `$HYPERPARAMETERS_PATH` (a YAML file that sgcli writes from the workload's
+Reads `$HYPERPARAMETERS_PATH` (a YAML file the AIR CLI writes from the workload's
 `parameters:` block), builds a `TrainerConfig`, and runs `Trainer(cfg).run()`
 directly.
 
 The YAML may name a `recipe:` (a backbone literal from `config.recipes.RECIPES`)
 — the best-known hyperparameters for that backbone are then the base, and every
-other YAML key is an explicit override on top. This is what keeps the sgcli
+other YAML key is an explicit override on top. This is what keeps the air
 workload `parameters:` block down to environment values (catalog/schema/paths/
 experiment) instead of a hand-maintained mirror of the notebook constants; both
 launch lanes consume the same recipe.
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_config(yaml_path: str) -> TrainerConfig:
-    """Build a TrainerConfig from a (sgcli-written) parameters YAML.
+    """Build a TrainerConfig from a (air-written) parameters YAML.
 
     With a `recipe:` key: start from `RECIPES[recipe]`, derive the model name,
     and apply every remaining YAML key as an override. Without one: the YAML
@@ -94,10 +94,20 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.experiment_name is None:
         logger.warning(
             "experiment_name is not set: the training run will land in the pod's "
-            "ambient/default MLflow experiment, invisible to the sweep and "
-            "deployment-job best-in-experiment gates. Set parameters.experiment_name "
-            "in the sgcli workload (distinct from the workload's own top-level "
-            "experiment_name)."
+            "ambient/default MLflow experiment (or the AIR workload's own run via "
+            "MLFLOW_RUN_ID), invisible to the sweep and deployment-job "
+            "best-in-experiment gates. Set parameters.experiment_name in the air "
+            "workload (distinct from the workload's own top-level experiment_name)."
+        )
+    elif os.environ.pop("MLFLOW_RUN_ID", None):
+        # The AIR CLI exports MLFLOW_RUN_ID for the workload's OWN MLflow run;
+        # left in place, mlflow.start_run() inside the Trainer would attach to
+        # that run instead of creating a fresh one in the configured
+        # experiment. Clear it so the training run lands where the gates look.
+        logger.info(
+            "Cleared ambient MLFLOW_RUN_ID (AIR workload run); training run will "
+            "be created in %s.",
+            cfg.experiment_name,
         )
 
     if args.dry_run:

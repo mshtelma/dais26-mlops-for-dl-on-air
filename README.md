@@ -9,7 +9,7 @@ comparison, dim 1024). DINOv2-base (dim 768) is the emergency fallback. All dime
 code parameterizes on `BackboneInfo` — nothing downstream hardcodes a dimension.
 Dataset: DENTEX dental X-rays (CC-BY-NC-SA 4.0, research/demo only).
 Compute: Databricks AI Runtime (AIR) / Serverless GPU only — no traditional ML clusters anywhere.
-Training launch: notebook `@distributed` or `sgcli` (terminal). Both share one training core.
+Training launch: notebook `@distributed` or the AIR CLI `air` (terminal). Both share one training core.
 Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 
 ![CI](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg)
@@ -43,7 +43,7 @@ databricks bundle run train_detector -t dev   # DAB quickstart: train + register
 Terminal-first training alternative:
 
 ```bash
-sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
+air run -f air/workload_train_detector.yaml --watch -p df1
 ```
 
 Both quickstarts stop after the challenger model version is registered. Endpoint
@@ -59,7 +59,7 @@ They differ only in launch mechanics:
 - **DAB quickstart**: `databricks bundle run train_detector -t dev` runs the
   notebook job on `GPU_8xH100`. The notebook uses the local
   `serverless_gpu.@distributed` helper and does **not** use `torchrun`.
-- **SGCLI quickstart**: `sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev`
+- **AIR CLI quickstart**: `air run -f air/workload_train_detector.yaml --watch -p df1`
   submits from a terminal and uses `torchrun`.
 
 ### Path A — Notebook (`@distributed`)
@@ -82,17 +82,17 @@ results = run_train.distributed()
 run_id  = next((r for r in results if r), None)   # rank-0 only returns a value
 ```
 
-### Path B — sgcli (terminal)
+### Path B — air (terminal)
 
 ```bash
 # One-time:
-uv tool install --python 3.12 /path/to/databricks_serverless_gpu_cli-<v>.whl
-databricks auth login --host <DATABRICKS_HOST>
+pip install databricks-air                      # AIR CLI (Beta)
+databricks auth login --host <DATABRICKS_HOST> --profile df1
 
 # Launch:
-sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
-sgcli get runs --limit 10 -p dev
-sgcli get logs <run-id> --rank 0 -p dev
+air run -f air/workload_train_detector.yaml --watch -p df1
+air list runs --limit 10 -p df1
+air logs <run-id> -p df1
 ```
 
 Both paths share **one core and one config source**: hyperparameters come from
@@ -101,7 +101,7 @@ the per-backbone recipe in `config/recipes.py` (the workload YAML just names it
 `src/dais26_dentex/train/trainer.py::Trainer`, which is distributed-aware
 (DDP, rank-0-only MLflow + UC registration) under both `@distributed` and
 `torchrun`. Both lanes log to the same MLflow experiment, so the promotion
-gates treat their runs identically. See [sgcli/README.md](sgcli/README.md).
+gates treat their runs identically. See [air/README.md](air/README.md).
 
 ### HP sweeps run on both paths too
 
@@ -110,7 +110,7 @@ The HPO campaign stages (`config/campaigns.py`) execute through one
 
 ```bash
 databricks bundle run campaign_sweep -t dev -- --params sweep_stage=cradio_s2   # DAB
-sgcli run -f sgcli/workload_sweep.yaml -p dev --override parameters.stage=cradio_s2   # terminal
+air run -f air/workload_sweep.yaml -p df1 --override parameters.stage=cradio_s2   # terminal
 ```
 
 ## Deployment model
@@ -171,10 +171,10 @@ dais26-mlops-for-dl-on-air/
 |       |-- models/         # backbones (BackboneInfo), adapters (FPN), detection_head, builder, targets
 |       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
 |       |-- serve/          # detector_pyfunc.py, detector_model_script.py (models-from-code loader), embedder_pyfunc.py, postprocess.py, endpoint_manager.py
-|       `-- train/          # trainer.py (Trainer class), losses, sweep + sweep_runner (HPO brain), cli + sweep_cli (sgcli entries)
+|       `-- train/          # trainer.py (Trainer class), losses, sweep + sweep_runner (HPO brain), cli + sweep_cli (air entries)
 |-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; env values via 00_config.py, hyperparameters via config/recipes.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
-|-- sgcli/                  # Serverless GPU CLI workloads (terminal train + sweep lanes)
+|-- air/                    # AIR CLI workloads (terminal train + sweep lanes)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
 |-- tests/                  # unit/ and integration/ pytest suites
 `-- docs/                   # ARCHITECTURE, RUNBOOK, BENCHMARKS, TALK, HPO
@@ -185,9 +185,9 @@ dais26-mlops-for-dl-on-air/
 | Concern | Where it lives | Why |
 |---|---|---|
 | Artifact contract | `config/manifest.py` (v2 `manifest.json`) | Single file replaces v1's three sidecar JSONs; `version` first → `head -1` triages a model. |
-| Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass schema; same instance feeds the notebook `@distributed` path and the sgcli/torchrun YAML. Defaults stay legacy-compatible — best-known VALUES live in recipes. |
-| Per-backbone recipes | `config/recipes.py` (`RECIPES`, `build_trainer_config`) | One source of campaign-final hyperparameters; the notebook builds from it and the sgcli workloads name it (`recipe:`), so the lanes cannot drift. |
-| HPO campaign | `config/campaigns.py` (`CAMPAIGN_STAGES`) + `train/sweep_runner.py` (`SweepRunner`) | Typed, validated stages + one sweep brain (parent run, trials, retrains, challenger gate) behind two launchers: notebook 02b (`@distributed`) and `train/sweep_cli.py` (torchrun via `sgcli/workload_sweep.yaml`). |
+| Trainer hyperparameters | `config/trainer_config.py` (`TrainerConfig`) | Single dataclass schema; same instance feeds the notebook `@distributed` path and the air/torchrun YAML. Defaults stay legacy-compatible — best-known VALUES live in recipes. |
+| Per-backbone recipes | `config/recipes.py` (`RECIPES`, `build_trainer_config`) | One source of campaign-final hyperparameters; the notebook builds from it and the air workloads name it (`recipe:`), so the lanes cannot drift. |
+| HPO campaign | `config/campaigns.py` (`CAMPAIGN_STAGES`) + `train/sweep_runner.py` (`SweepRunner`) | Typed, validated stages + one sweep brain (parent run, trials, retrains, challenger gate) behind two launchers: notebook 02b (`@distributed`) and `train/sweep_cli.py` (torchrun via `air/workload_sweep.yaml`). |
 | Distributed primitives | `distributed/primitives.py` + `distributed/barrier_dance.py` | `safe_barrier` surfaces dead-rank deadlocks as `BarrierTimeoutError` instead of hanging on NCCL. `rank0_first` is sequence-matched and avoids the cold-cache HF download race. |
 | HF env hardening | `platform/hf_env.py::configure_hf_env` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` (UC Volume FUSE rejects parallel chunked writes). |
 | Pyfunc serving deps | `pyproject.toml::[tool.dais26.serving-deps]` ↔ `platform/mlflow_io.py::serving_pip_requirements` | One edit to add a runtime dep; the wheel ships `pyproject.toml` as `dais26_dentex/_pyproject.toml` so the lookup works in AIR's ephemeral env. CI guards via `assert_serving_reqs_match_pyproject`. `torch`/`torchvision` are pinned to the cu124 build (`2.6.0` / `0.21.0`) so GPU_SMALL (T4, driver CUDA 12.4) does not silently fall back to CPU. |
@@ -215,7 +215,7 @@ cached in a UC Volume by `scripts/pin_model_cache.py`.
 
 | Doc | Contents |
 |-----|----------|
-| [docs/README.md](docs/README.md) | DAB + SGCLI quickstarts, prerequisites, operator lanes, troubleshooting |
+| [docs/README.md](docs/README.md) | DAB + AIR CLI quickstarts, prerequisites, operator lanes, troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @challenger→@champion, Mosaic AI comparison |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Pre-demo D-1 checklist, rollback procedure, DINOv2 fallback, service principal creation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Latency and accuracy numbers (populated Phase 4) |

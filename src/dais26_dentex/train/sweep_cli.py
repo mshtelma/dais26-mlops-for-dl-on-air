@@ -1,11 +1,11 @@
-"""sgcli / torchrun entrypoint for the HPO sweep — terminal twin of 02b.
+"""air / torchrun entrypoint for the HPO sweep — terminal twin of 02b.
 
 Runs the SAME `SweepRunner` brain as `notebooks/02b_hpo_sweep.py`, but inside
 one torchrun allocation: trials execute sequentially in-process on all ranks
 (each is a full DDP training run), instead of one `@distributed` dispatch per
 trial. Rank 0 orchestrates; workers follow the runner's broadcast command loop.
 
-Reads `$HYPERPARAMETERS_PATH` (the sgcli workload `parameters:` block), which
+Reads `$HYPERPARAMETERS_PATH` (the air workload `parameters:` block), which
 must carry:
 
     stage: dinov3_s1            # a config.campaigns.CAMPAIGN_STAGES name
@@ -103,6 +103,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     spec, base = load_sweep_inputs(yaml_path)
+
+    # The AIR CLI exports MLFLOW_RUN_ID for the workload's OWN MLflow run; the
+    # sweep manages its own parent + per-trial runs, so a leaked ambient run id
+    # would make every trial's fluent mlflow.start_run() attach to the same
+    # workload run. Clear it on every rank — before the dry-run return so the
+    # printed env is faithful, and before the mlflow import below.
+    if os.environ.pop("MLFLOW_RUN_ID", None):
+        logger.info("Cleared ambient MLFLOW_RUN_ID (AIR workload run); sweep manages its own runs.")
 
     if args.dry_run:
         print(f"stage={spec.stage_name} backbone={spec.backbone}")

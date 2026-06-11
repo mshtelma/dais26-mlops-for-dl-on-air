@@ -1,7 +1,7 @@
 """HPO campaign definitions — the "push to 0.60" stage chain, as package data.
 
 Moved verbatim from `notebooks/00_config.py` so the campaign is (a) importable
-by every launch surface (notebook 02b AND the sgcli/torchrun sweep CLI) and
+by every launch surface (notebook 02b AND the air/torchrun sweep CLI) and
 (b) validated by unit tests instead of failing at GPU time on a typo'd field.
 
 The stages are a HISTORICAL RECORD of the campaign chain (docs/HPO.md): pinned
@@ -112,7 +112,7 @@ CAMPAIGN_STAGES: dict[str, CampaignStage] = {
     # ===== Plumbing smoke (NOT part of the science campaign) =====
     "smoke": CampaignStage(  # cheapest end-to-end sweep: 1 trial x 1 epoch + 2-epoch retrain
         # Exists to validate the sweep lanes (notebook 02b AND
-        # sgcli/workload_sweep.yaml) end-to-end in minutes instead of hours:
+        # air/workload_sweep.yaml) end-to-end in minutes instead of hours:
         # parent run + one nested trial + one measure-only retrain, no
         # registration, no alias movement. Uses the C-RADIO recipe base so the
         # ungated backbone path is exercised.

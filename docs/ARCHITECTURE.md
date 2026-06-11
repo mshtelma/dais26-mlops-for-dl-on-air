@@ -197,7 +197,7 @@ Does **not** deploy:
 ```
 
 The training core (`Trainer`) is identical across launch paths — `notebook @distributed`
-or `sgcli` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
+or `air` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
 or `--config`, builds the `TrainerConfig`, and dispatches to the same `Trainer.run()`.
 
 ### Phase 2b (optional): `databricks bundle run campaign_sweep -t dev -- --params sweep_stage=<stage>`
@@ -662,7 +662,7 @@ src/dais26_dentex/
 │   ├── manifest.py           (Manifest v2 dataclass: BackboneSpec + DetectorSpec
 │   │                          → single manifest.json, version-first key order)
 │   └── trainer_config.py     (TrainerConfig frozen dataclass; from_yaml/from_dict
-│                              feeds notebook @distributed AND sgcli/torchrun)
+│                              feeds notebook @distributed AND air/torchrun)
 │
 ├── data/
 │   ├── dataset.py            (PyTorch Dataset over COCO JSON + UC Volume images)
@@ -734,7 +734,7 @@ src/dais26_dentex/
     ├── sweep.py              (pure HPO helpers: iter_trials grid/random +
     │                          select_best; no torch/mlflow — unit-tested)
     ├── losses.py             (focal + smooth-L1)
-    └── cli.py                (sgcli/torchrun entrypoint — reads
+    └── cli.py                (air/torchrun entrypoint — reads
                                $HYPERPARAMETERS_PATH or --config; builds
                                TrainerConfig and runs Trainer(cfg).run() so every
                                YAML knob is honored; prints MODEL_URI=<run_id>)
@@ -745,7 +745,7 @@ src/dais26_dentex/
 | Anchor | Module | Why |
 |---|---|---|
 | Manifest v2 | `config/manifest.py` | One `manifest.json` (version first → `head -1` triages a model) replaces v1's three sidecar JSONs. `load_manifest` raises `IncompatibleArtifactError` on v1 with a one-shot migration hint. |
-| TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and sgcli's torchrun. |
+| TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and the air lane's torchrun. |
 | `safe_barrier` | `distributed/primitives.py` | Bounded `wait()` over `dist.barrier(async_op=True)` — surfaces `BarrierTimeoutError` instead of hanging on NCCL when a peer rank crashed. |
 | `rank0_first` | `distributed/barrier_dance.py` | Non-rank-0 hits its barrier first, rank 0 does the work and then hits its barrier; trailing symmetric barrier. Pattern fixes the cold-cache HF download race. |
 | `configure_hf_env` | `platform/hf_env.py` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` — UC Volume FUSE rejects parallel chunked writes. |

@@ -19,10 +19,10 @@ Usage:
     cfg.validate()                        # raises ValueError on bad combos
     mlflow.log_params(cfg.to_mlflow_params())
 
-Note `from_yaml` expects a flat mapping of field names (what sgcli writes to
+Note `from_yaml` expects a flat mapping of field names (what the air CLI writes to
 `$HYPERPARAMETERS_PATH` from the workload's `parameters:` block) — NOT the
 workload YAML itself, whose config lives nested under `parameters:`. The
-sgcli entrypoint (`train.cli.load_config`) additionally resolves a `recipe:`
+air entrypoint (`train.cli.load_config`) additionally resolves a `recipe:`
 key before delegating here.
 """
 

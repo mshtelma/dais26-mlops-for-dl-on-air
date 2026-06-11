@@ -53,7 +53,7 @@ DETECTOR_INFERENCE_TABLE = f"{TABLE_PREFIX}detector_inference_payload"
 # detector model + endpoint cleanly and a DINOv3 run does NOT overwrite the
 # C-RADIO model. EXPERIMENT_NAME stays shared (see below) so all runs land in
 # one experiment for side-by-side comparison. The mapping lives in the package
-# (`config.recipes`) so the sgcli lane and tests resolve the same identities;
+# (`config.recipes`) so the air lane and tests resolve the same identities;
 # the leading-underscore alias keeps the historical notebook-local name.
 from dais26_dentex.config.recipes import (
     DETECTOR_NAMES_BY_BACKBONE as _DETECTOR_NAMES_BY_BACKBONE,
@@ -138,7 +138,7 @@ EXPLORE_SPLIT = "train"             # train | val | test | drift_synthetic
 # 02_train_detector_air
 # Hyperparameters come from the per-backbone recipe in
 # `dais26_dentex.config.recipes.RECIPES` (campaign-final best-known config;
-# same source the sgcli workloads name via `recipe:`). The constants below are
+# same source the air workloads name via `recipe:`). The constants below are
 # the notebook lane's EXPLICIT overrides / launch knobs only.
 #
 # Demo wall-time override: the recipes' full schedule is 150 epochs
@@ -158,7 +158,7 @@ TRAIN_GPU_TYPE = "h100"             # "h100" | "a10"
 #   dais26_dentex.train.sweep_runner — the orchestration both lanes share.
 # Pick a stage here (or pass the `sweep_stage` job parameter, which wins);
 # None runs the legacy SWEEP_DEFAULTS sweep. The same stages are launchable
-# from a terminal via `sgcli run -f sgcli/workload_sweep.yaml
+# from a terminal via `air run -f air/workload_sweep.yaml
 # --override parameters.stage=<name>`.
 SWEEP_STAGE: str | None = None
 

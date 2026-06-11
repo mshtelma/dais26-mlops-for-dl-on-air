@@ -1,7 +1,7 @@
 """Structural tests for the two supported quickstart lanes.
 
 The lanes share one source of hyperparameter truth (`config.recipes`): the
-notebook builds via `build_trainer_config(BACKBONE, ...)`, the sgcli workload
+notebook builds via `build_trainer_config(BACKBONE, ...)`, the air workload
 names the same recipe in its `parameters:` block and resolves through
 `train.cli.load_config`. These tests pin that contract — workload parameters
 must stay environment-only (plus deliberate, allowlisted overrides), never a
@@ -24,9 +24,9 @@ from dais26_dentex.train import cli
 REPO = Path(__file__).resolve().parents[2]
 DAB_TRAIN_JOB = REPO / "resources" / "jobs" / "train_detector.yml"
 DAB_TRAIN_NOTEBOOK = REPO / "notebooks" / "02_train_detector_air.py"
-SGCLI_WORKLOADS = {
-    "cradio_v4_so400m": REPO / "sgcli" / "workload_train_detector.yaml",
-    "dinov3_vitl16": REPO / "sgcli" / "workload_train_detector_dinov3.yaml",
+AIR_WORKLOADS = {
+    "cradio_v4_so400m": REPO / "air" / "workload_train_detector.yaml",
+    "dinov3_vitl16": REPO / "air" / "workload_train_detector_dinov3.yaml",
 }
 
 # Workload parameters that are legitimately environment/launch concerns rather
@@ -107,26 +107,26 @@ def test_dab_notebook_trains_from_the_shared_recipe_without_torchrun() -> None:
 
 
 # ---------------------------------------------------------------------------
-# sgcli lane
+# air lane
 # ---------------------------------------------------------------------------
 
 
-def test_sgcli_quickstart_keeps_torchrun_on_single_node_h100() -> None:
-    workload = _load_yaml(SGCLI_WORKLOADS["cradio_v4_so400m"])
+def test_air_quickstart_keeps_torchrun_on_single_node_h100() -> None:
+    workload = _load_yaml(AIR_WORKLOADS["cradio_v4_so400m"])
 
-    assert workload["compute"] == {"gpus": 8, "gpu_type": "h100"}
+    assert workload["compute"] == {"num_accelerators": 8, "accelerator_type": "GPU_8xH100"}
     assert "torchrun" in workload["command"]
     assert "-m dais26_dentex.train.cli" in workload["command"]
     assert workload["parameters"]["register_model"] is True
     assert workload["parameters"]["set_candidate_alias"] is True
 
 
-@pytest.mark.parametrize("backbone", sorted(SGCLI_WORKLOADS))
-def test_sgcli_parameters_are_recipe_plus_environment_only(backbone: str) -> None:
+@pytest.mark.parametrize("backbone", sorted(AIR_WORKLOADS))
+def test_air_parameters_are_recipe_plus_environment_only(backbone: str) -> None:
     """Every workload parameter is either an environment value, an allowlisted
     deliberate override, or it fails this test — the duplication the old
     value-mirror test merely guarded is now structurally impossible."""
-    params = _load_yaml(SGCLI_WORKLOADS[backbone])["parameters"]
+    params = _load_yaml(AIR_WORKLOADS[backbone])["parameters"]
 
     assert params["recipe"] == backbone
     assert params["recipe"] in RECIPES
@@ -137,7 +137,7 @@ def test_sgcli_parameters_are_recipe_plus_environment_only(backbone: str) -> Non
 
     overrides = set(params) - ENV_KEYS
     assert overrides <= ALLOWED_OVERRIDES, (
-        f"non-allowlisted hyperparameter overrides in {SGCLI_WORKLOADS[backbone].name}: "
+        f"non-allowlisted hyperparameter overrides in {AIR_WORKLOADS[backbone].name}: "
         f"{overrides - ALLOWED_OVERRIDES}"
     )
     assert not (set(params) & RECIPE_CRITICAL), (
@@ -145,17 +145,17 @@ def test_sgcli_parameters_are_recipe_plus_environment_only(backbone: str) -> Non
         f"{set(params) & RECIPE_CRITICAL}"
     )
 
-    # The MLflow experiment must be pinned so sgcli-trained versions are
+    # The MLflow experiment must be pinned so air-trained versions are
     # visible to the sweep / deployment-job best-in-experiment gates.
     assert params["experiment_name"].endswith("dais26_vfm_experiment")
 
 
-@pytest.mark.parametrize("backbone", sorted(SGCLI_WORKLOADS))
-def test_sgcli_parameters_resolve_through_the_shared_recipe(backbone: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("backbone", sorted(AIR_WORKLOADS))
+def test_air_parameters_resolve_through_the_shared_recipe(backbone: str, tmp_path: Path) -> None:
     """End-to-end lane equivalence: feeding the workload's parameters block
     through the real cli loader must yield the recipe's hyperparameters with
     only the declared overrides applied."""
-    params = _load_yaml(SGCLI_WORKLOADS[backbone])["parameters"]
+    params = _load_yaml(AIR_WORKLOADS[backbone])["parameters"]
     hp = tmp_path / "hp.yaml"
     hp.write_text(yaml.safe_dump(params))
 

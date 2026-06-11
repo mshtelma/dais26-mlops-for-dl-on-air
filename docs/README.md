@@ -14,7 +14,7 @@ Before running either quickstart, verify the following are available in your Dat
 | Unity Catalog enabled | Workspace settings → Unity Catalog |
 | AI Runtime access with single-node 8xH100 quota | Databricks account / workspace quota |
 | Databricks CLI v0.230+ | `databricks version` |
-| `sgcli` private-preview wheel | Required only for the SGCLI quickstart |
+| AIR CLI (`pip install databricks-air`, Beta) | Required only for the AIR CLI quickstart |
 
 HuggingFace account is **not** required for the default C-RADIOv4 path (ungated). A HF token is only
 needed if you activate the DINOv3 comparison path.
@@ -41,7 +41,7 @@ This installs all runtime and dev dependencies (torch, transformers, mlflow, dat
 in editable mode so changes to `src/dais26_dentex/` are immediately reflected. Environment values
 (UC names, experiment, demo-time overrides) live in `notebooks/00_config.py`; training
 hyperparameters come from the per-backbone recipes in `dais26_dentex.config.recipes` — shared with
-the sgcli lane. The only job-parameter exceptions are `sweep_stage` and `deploy_action`, which jobs
+the air lane. The only job-parameter exceptions are `sweep_stage` and `deploy_action`, which jobs
 pass as `base_parameters` so one job definition serves every campaign stage / deploy mode.
 
 **All UC names are config-driven from `notebooks/00_config.py`.** The current defaults are:
@@ -148,16 +148,16 @@ Success criteria:
 
 ---
 
-## SGCLI Quickstart
+## AIR CLI Quickstart
 
 From the repo root:
 
 ```bash
-sgcli run -f sgcli/workload_train_detector.yaml --watch -p dev
+air run -f air/workload_train_detector.yaml --watch -p df1
 ```
 
-This submits the same training config to one 8xH100 machine through SGCLI and
-launches the package CLI with `torchrun`. The package CLI reads the SGCLI-written
+This submits the same training config to one 8xH100 machine through AIR CLI and
+launches the package CLI with `torchrun`. The package CLI reads the AIR CLI-written
 `$HYPERPARAMETERS_PATH`, resolves the named `recipe:` from
 `dais26_dentex.config.recipes` (the same campaign-final hyperparameters the
 notebook lane builds from), constructs `TrainerConfig`, and runs the same
@@ -167,8 +167,8 @@ experiment.
 Inspect a run:
 
 ```bash
-sgcli get runs --limit 10 -p dev
-sgcli get logs <run-id> --rank 0 -p dev
+air list runs --limit 10 -p df1
+air logs <run-id> -p df1
 ```
 
 Success criteria are the same as DAB: rank 0 logs the MLflow run, registers the
@@ -203,11 +203,11 @@ launch surface — and one `dais26_dentex.train.sweep_runner.SweepRunner` owns t
 orchestration (trial loop, MLflow nesting, winner retrains, the `@challenger`
 best-in-experiment gate) for **both** lanes.
 
-Terminal alternative — the same stage through sgcli/torchrun, one 8xH100 allocation
+Terminal alternative — the same stage through air/torchrun, one 8xH100 allocation
 running all trials sequentially:
 
 ```bash
-sgcli run -f sgcli/workload_sweep.yaml --watch -p dev \
+air run -f air/workload_sweep.yaml --watch -p df1 \
   --override parameters.stage=dinov3_s1
 ```
 

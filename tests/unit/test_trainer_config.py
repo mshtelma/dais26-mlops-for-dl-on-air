@@ -52,7 +52,7 @@ def test_with_overrides_returns_new_instance() -> None:
 
 
 def test_from_dict_coerces_strings_to_typed_values() -> None:
-    """sgcli SHOULD pass typed YAML values, but defensively coerce stringly-
+    """the air CLI SHOULD pass typed YAML values, but defensively coerce stringly-
     typed inputs too — that's what the old `_coerce` function did and tests
     here pin the behavior so it doesn't regress."""
     cfg = TrainerConfig.from_dict(

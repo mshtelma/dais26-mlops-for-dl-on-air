@@ -9,7 +9,7 @@ launch surfaces differ ONLY in the `launch` callable they inject:
   job per trial and returns the rank-0 run_id. The runner executes on the
   single-process notebook driver, where `broadcast_object` degrades to
   identity — the command loop collapses to a plain for-loop.
-* sgcli/torchrun lane (`train.sweep_cli`): every rank executes the runner.
+* air/torchrun lane (`train.sweep_cli`): every rank executes the runner.
   `launch` constructs `Trainer(cfg, manage_process_group=False)` in-process.
   Rank 0 is the sole decision-maker; every coordinated step starts with one
   `broadcast_object` command so workers never diverge (and a rank-0 failure

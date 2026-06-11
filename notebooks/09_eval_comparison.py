@@ -116,7 +116,7 @@ for backbone, cfg in COMPARE_BACKBONES.items():
 if not any(results[split] for split in EVAL_SPLITS):
     raise RuntimeError(
         "No detectors could be loaded. Train + register at least one backbone "
-        "(02_train_detector_air.py / the sgcli workloads) first."
+        "(02_train_detector_air.py / the air workloads) first."
     )
 
 # COMMAND ----------

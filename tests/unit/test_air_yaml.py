@@ -1,4 +1,4 @@
-"""Schema/structural tests for sgcli/*.yaml + cross-file consistency with pyproject.toml."""
+"""Schema/structural tests for air/*.yaml + cross-file consistency with pyproject.toml."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ from pathlib import Path
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-WORKLOAD = REPO / "sgcli" / "workload_train_detector.yaml"
-REQS = REPO / "sgcli" / "requirements.yaml"
+WORKLOAD = REPO / "air" / "workload_train_detector.yaml"
+REQS = REPO / "air" / "requirements.yaml"
 PYPROJECT = REPO / "pyproject.toml"
 
 
@@ -31,15 +31,16 @@ def test_workload_required_keys():
 
 def test_workload_compute_h100_or_a10():
     d = _load(WORKLOAD)
-    assert d["compute"]["gpu_type"] in {"h100", "a10"}
-    assert isinstance(d["compute"]["gpus"], int) and d["compute"]["gpus"] >= 1
+    assert d["compute"]["accelerator_type"] in {"GPU_8xH100", "GPU_1xH100", "GPU_1xA10"}
+    assert isinstance(d["compute"]["num_accelerators"], int) and d["compute"]["num_accelerators"] >= 1
 
 
-def test_workload_code_source_repo_path_is_repo_root():
-    """repo_path is resolved relative to CWD (sgcli runs from the repo root), so it
-    must be `.` to snapshot the repo root."""
+def test_workload_code_source_root_path_is_repo_root():
+    """air resolves snapshot.root_path relative to the WORKLOAD YAML file (which
+    lives in air/), so it must be `..` to package the repo root — `.` would
+    snapshot only the air/ directory (observed via `air run --dry-run`)."""
     d = _load(WORKLOAD)
-    assert d["code_source"]["snapshot"]["repo_path"] == "."
+    assert d["code_source"]["snapshot"]["root_path"] == ".."
 
 
 def test_workload_command_does_not_use_no_deps():

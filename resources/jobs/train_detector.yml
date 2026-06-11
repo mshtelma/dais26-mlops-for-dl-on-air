@@ -26,7 +26,7 @@ targets:
           # Environment config (catalog / schema / backbone / workload sizing) lives
           # in notebooks/00_config.py and is pulled in via `%run ./00_config`;
           # hyperparameters come from the per-backbone recipe in
-          # dais26_dentex.config.recipes (shared with the sgcli lane). Edit
+          # dais26_dentex.config.recipes (shared with the air lane). Edit
           # 00_config.py to switch values (incl. TRAIN_GPUS / TRAIN_GPU_TYPE, which
           # must match the train task's hardware_accelerator below). The only
           # base_parameters here is confirm_challenger's deploy_action mode switch.

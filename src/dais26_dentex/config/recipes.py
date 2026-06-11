@@ -6,7 +6,7 @@ docs/HPO.md). Both launch surfaces consume the same dict:
 
 * notebook lane: `02_train_detector_air.py` calls `build_trainer_config(BACKBONE, ...)`
   inside the `@distributed` closure;
-* sgcli lane: `train/cli.py` resolves a `recipe:` key in the workload
+* air lane: `train/cli.py` resolves a `recipe:` key in the workload
   `parameters:` block and merges the YAML's remaining keys on top.
 
 `TrainerConfig` field defaults stay frozen at the *legacy* values (absolute
@@ -28,7 +28,7 @@ from typing import Any
 from dais26_dentex.config.trainer_config import TrainerConfig
 
 # UC model + dev-endpoint names keyed by the internal backbone literal. Moved
-# here from notebooks/00_config.py so the sgcli lane and tests can resolve the
+# here from notebooks/00_config.py so the air lane and tests can resolve the
 # same identity mapping the notebooks use. The cradio entry preserves the
 # historical names for backward compatibility.
 DETECTOR_NAMES_BY_BACKBONE: dict[str, dict[str, str]] = {

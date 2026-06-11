@@ -1,7 +1,7 @@
 """`Trainer` class — owns the train + validate + checkpoint + register loop.
 
 The single training core behind every launch surface: the notebook
-`@distributed` closure (02 / 02b), the sgcli/torchrun CLIs (`train.cli`,
+`@distributed` closure (02 / 02b), the air/torchrun CLIs (`train.cli`,
 `train.sweep_cli`), and tests all construct a `TrainerConfig` and call
 `Trainer(cfg).run()`.
 
