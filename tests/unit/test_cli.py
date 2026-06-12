@@ -358,3 +358,24 @@ def test_load_config_env_without_recipe(tmp_path: Path) -> None:
     assert cfg.catalog == "mlops_pj"
     assert cfg.schema == "dais26_vfm"
     assert cfg.anchor_layout == "absolute"  # no recipe → legacy defaults
+
+
+def test_load_config_accepts_air_full_spec_format(tmp_path: Path) -> None:
+    """air writes the FULL workload spec to $HYPERPARAMETERS_PATH with the user
+    params NESTED under `parameters:` (not a flat mapping) — load_config must
+    descend into it. Regression for the E2E '`recipe`/`stage` is required'
+    failure that flat-dict unit fixtures masked."""
+    p = tmp_path / "training_config.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {
+                "experiment_name": "dais26-mlops-for-dl-on-air",
+                "compute": {"num_accelerators": 8, "accelerator_type": "GPU_8xH100"},
+                "parameters": {"recipe": "cradio_v4_so400m", "env": "df1", "epochs": 2},
+            }
+        )
+    )
+    cfg = cli.load_config(str(p))
+    assert cfg.backbone_name == "cradio_v4_so400m"
+    assert cfg.catalog == "main"  # env df1 resolved from the NESTED params
+    assert cfg.epochs == 2

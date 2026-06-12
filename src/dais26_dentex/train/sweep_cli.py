@@ -50,6 +50,11 @@ def load_sweep_inputs(yaml_path: str) -> tuple[SweepSpec, dict[str, Any]]:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"YAML at {yaml_path} did not produce a mapping; got {type(raw).__name__}")
+    # `air` writes the FULL workload spec to $HYPERPARAMETERS_PATH with the user
+    # params nested under `parameters:`; a local --config / test file is already
+    # the flat params mapping. Accept both.
+    if isinstance(raw.get("parameters"), dict):
+        raw = raw["parameters"]
 
     stage_name = raw.pop("stage", None)
     if not stage_name:

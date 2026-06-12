@@ -73,6 +73,30 @@ def test_load_sweep_inputs_env_resolves_locations(
     assert spec.backbone == "dinov3_vitl16"
 
 
+def test_load_sweep_inputs_accepts_air_full_spec_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """air writes the FULL workload spec to $HYPERPARAMETERS_PATH with the user
+    params NESTED under `parameters:` — regression for the E2E '`stage` is
+    required' failure (flat-dict unit fixtures masked it)."""
+    for var in ("DAIS26_ENV", "DAIS26_CATALOG", "DAIS26_SCHEMA", "DAIS26_EXPERIMENT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DAIS26_ENV_FILE", "/nonexistent/dais26-no-overlay.yaml")
+    path = _write(
+        tmp_path,
+        {
+            "experiment_name": "dais26-mlops-for-dl-on-air",
+            "compute": {"num_accelerators": 8},
+            "parameters": {"stage": "smoke", "env": "df1"},
+        },
+    )
+    spec, base = sweep_cli.load_sweep_inputs(path)
+    assert spec.stage_name == "smoke"
+    assert spec.backbone == "cradio_v4_so400m"
+    assert base["catalog"] == "main"
+    assert "env" not in base
+
+
 def test_load_sweep_inputs_requires_stage(tmp_path: Path) -> None:
     path = _write(tmp_path, {"catalog": "c", "schema": "s"})
     with pytest.raises(ValueError, match="`stage` is required"):
