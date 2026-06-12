@@ -3,25 +3,21 @@
 # MAGIC # 09b — Free eval-threshold grid (no retraining)
 # MAGIC
 # MAGIC The decode/NMS thresholds (`score_threshold`, `nms_iou_threshold`,
-# MAGIC `max_detections`) are **inference-time** knobs: `DetectionModel` reads them
-# MAGIC as plain attributes at forward time (see `models/detection_head.py`), so we
-# MAGIC can sweep them on an **already-trained, registered** detector without
-# MAGIC spending a single GPU-hour on retraining. This is the cheapest lever in the
-# MAGIC "push to 0.60" plan (docs/HPO.md) — run it first to bank any free mAP and to
-# MAGIC record the per-class **Caries AP@50** baseline that the campaign gates on.
+# MAGIC `max_detections`) are **inference-time** knobs the `DetectionModel` reads as
+# MAGIC plain attributes at forward time, so we can sweep them on an **already-trained,
+# MAGIC registered** detector without spending a GPU-hour on retraining — the cheapest
+# MAGIC lever in the "push to 0.60" plan (docs/HPO.md). Run it first to bank any free
+# MAGIC mAP and record the per-class Caries AP@50 the campaign gates on.
 # MAGIC
-# MAGIC For each registered backbone (`@candidate` preferred, `@champion` fallback —
-# MAGIC champion is the post-tuning end-state; we grade the in-tuning candidate) this notebook:
-# MAGIC   1. loads the serving pyfunc once,
-# MAGIC   2. mutates the inner `DetectionModel`'s thresholds across a grid,
-# MAGIC   3. re-evaluates the held-out split with the same `evaluate_coco` the
-# MAGIC      trainer uses, and
-# MAGIC   4. prints the best (score, nms_iou, max_det) by mAP@50 plus the Caries
-# MAGIC      AP@50 at that point and at the as-registered defaults.
+# MAGIC For each registered backbone (`@candidate` preferred, `@champion` fallback) it
+# MAGIC loads the serving pyfunc once, then per grid point mutates the inner
+# MAGIC `DetectionModel`'s thresholds and re-scores the held-out split through the SAME
+# MAGIC `eval.runner.score_model_on_split` the comparison + promotion gate use (09 / 10),
+# MAGIC then prints the best (score, nms_iou, max_det) by mAP@50 plus the Caries AP@50
+# MAGIC there and at the as-registered defaults.
 # MAGIC
-# MAGIC Requires a **GPU** notebook. The winning thresholds are then folded into the
-# MAGIC finalize-stage `TrainerConfig` (now config fields) so the re-registered model
-# MAGIC reproduces them at serve time.
+# MAGIC Requires a **GPU** notebook. The winning thresholds fold into the finalize-stage
+# MAGIC `TrainerConfig` (now config fields) so the re-registered model reproduces them.
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -33,28 +29,29 @@ dbutils.library.restartPython()
 # MAGIC %run ./00_config
 
 # COMMAND ----------
-import base64
 import gc
 import json
 import tempfile
 from itertools import product
-from pathlib import Path
 
 import mlflow
 import pandas as pd
 import torch
 
-from dais26_dentex.data.dentex_loader import get_label_map, load_canonical_split
-from dais26_dentex.eval.coco_metrics import evaluate_coco, format_predictions_for_coco
+from dais26_dentex.data.dentex_loader import get_label_map
+from dais26_dentex.eval.runner import (
+    build_name_to_category_id,
+    inner_detection_model,
+    load_detector_by_alias,
+    score_model_on_split,
+)
 
 mlflow.set_registry_uri("databricks-uc")
 
-EVAL_SPLIT = "val"          # held out of training; mirrors trainer validation
+EVAL_SPLIT = "val"  # held out of training; mirrors trainer validation
 PREDICT_CHUNK = 16
-# Grid the CANDIDATE first: during the push-to-0.60 tuning the freshly-registered
-# tuning winners live at @candidate, while @champion is the *post-tuning* end-state
-# (often stale/old or, for DINOv3, the known-broken v2). We want to grade what's
-# being tuned, so candidate takes precedence and champion is only a fallback.
+# Grid the CANDIDATE first: freshly-registered tuning winners live at @candidate;
+# @champion is the post-tuning end-state (often stale). Champion is only a fallback.
 ALIAS_PREFERENCE = ("candidate", "champion")
 
 # Backbones to grid. Mirrors 09_eval_comparison.py.
@@ -63,115 +60,34 @@ COMPARE_BACKBONES: dict[str, dict[str, str]] = {
     "dinov3_vitl16": {"model_short": "dinov3_detector"},
 }
 
-# The free grid. Smaller `score_threshold` recovers low-confidence true positives
-# (helps AR / small-lesion recall); `nms_iou_threshold` trades duplicate
-# suppression vs. recall of overlapping lesions; `max_detections` rarely binds on
-# dental panoramics but is cheap to check.
+# The free grid. Smaller score_threshold recovers low-confidence true positives
+# (helps AR / small-lesion recall); nms_iou_threshold trades duplicate suppression
+# vs recall of overlapping lesions; max_detections rarely binds but is cheap to check.
 SCORE_THRESHOLDS = [0.01, 0.05, 0.10]
 NMS_IOU_THRESHOLDS = [0.40, 0.50, 0.60]
 MAX_DETECTIONS = [100, 300]
 
-LABEL_MAP = get_label_map()  # {0: "Caries", ...}
-NAME_TO_ID = {v: k for k, v in LABEL_MAP.items()}
-CARIES_NAME = LABEL_MAP.get(0, "Caries")
-
-
-def _to_category_id(name: object) -> int:
-    key = str(name)
-    return NAME_TO_ID[key] if key in NAME_TO_ID else int(key)
-
+NAME_TO_ID = build_name_to_category_id()  # predicted class name -> COCO category_id
+CARIES_NAME = get_label_map().get(0, "Caries")
 
 print(f"EVAL_SPLIT = {EVAL_SPLIT}")
 print(f"Catalog/schema = {CATALOG}.{SCHEMA}")
 print(f"Grid: {len(SCORE_THRESHOLDS)}x{len(NMS_IOU_THRESHOLDS)}x{len(MAX_DETECTIONS)} = "
       f"{len(SCORE_THRESHOLDS) * len(NMS_IOU_THRESHOLDS) * len(MAX_DETECTIONS)} combos/backbone")
 
-# COMMAND ----------
-# ---- Materialize a normalized COCO ground-truth file (same as 09) ----
-coco_gt = load_canonical_split(VOLUME_PATH, EVAL_SPLIT)
-for ann in coco_gt["annotations"]:
-    if "area" not in ann:
-        x, y, w, h = ann["bbox"]
-        ann["area"] = float(w) * float(h)
-    ann.setdefault("iscrowd", 0)
 
-with tempfile.NamedTemporaryFile("w", suffix=f"_{EVAL_SPLIT}_gt.json", delete=False) as _gt_tmp:
-    json.dump(coco_gt, _gt_tmp)
-GT_PATH = _gt_tmp.name
-images_dir = Path(VOLUME_PATH) / "images" / EVAL_SPLIT
-print(f"GT: {len(coco_gt['images'])} images, {len(coco_gt['annotations'])} annotations -> {GT_PATH}")
-
-# COMMAND ----------
-# ---- Helpers ----
-
-
-def _load_detector(model_short: str):
-    full = f"{CATALOG}.{SCHEMA}.{model_short}"
-    for alias in ALIAS_PREFERENCE:
-        uri = f"models:/{full}@{alias}"
-        try:
-            return mlflow.pyfunc.load_model(uri), uri
-        except Exception as e:
-            print(f"  {uri}: unavailable ({type(e).__name__})")
-    return None, None
-
-
-def _inner_detection_model(loaded):
-    """Reach the DetectionModel inside a loaded serving pyfunc.
-
-    Uses the public `unwrap_python_model()` when available (recent MLflow),
-    falling back to the private impl path. Returns the torch `DetectionModel`
-    whose `score_threshold`/`nms_iou_threshold`/`max_detections` we mutate.
-    """
-    pyfunc_model = None
-    if hasattr(loaded, "unwrap_python_model"):
-        try:
-            pyfunc_model = loaded.unwrap_python_model()
-        except Exception:
-            pyfunc_model = None
-    if pyfunc_model is None:
-        pyfunc_model = loaded._model_impl.python_model
-    return pyfunc_model.model
-
-
-def _b64(path: Path) -> str:
-    return base64.b64encode(path.read_bytes()).decode("ascii")
-
-
-_ITEMS = [(img["id"], images_dir / img["file_name"]) for img in coco_gt["images"]]
-# Pre-encode once; reused across every grid point so the grid cost is pure forward.
-_ENCODED = [(image_id, _b64(p)) for image_id, p in _ITEMS]
-
-
-def _predict_split(loaded) -> list[dict]:
-    model_output: list[dict] = []
-    for start in range(0, len(_ENCODED), PREDICT_CHUNK):
-        chunk = _ENCODED[start : start + PREDICT_CHUNK]
-        df_in = pd.DataFrame({"image": [b64 for _, b64 in chunk]})
-        preds = loaded.predict(df_in).reset_index(drop=True)
-        for (image_id, _), (_, row) in zip(chunk, preds.iterrows(), strict=True):
-            labels = [_to_category_id(name) for name in row["labels"]]
-            model_output.append(
-                {
-                    "image_id": int(image_id),
-                    "boxes": torch.tensor(row["boxes"], dtype=torch.float32).reshape(-1, 4),
-                    "scores": torch.tensor(row["scores"], dtype=torch.float32).reshape(-1),
-                    "labels": torch.tensor(labels, dtype=torch.long).reshape(-1),
-                }
-            )
-    return model_output
-
-
-def _score(loaded) -> dict:
-    out = _predict_split(loaded)
-    coco_preds = format_predictions_for_coco(out)
-    if not coco_preds:
-        return {"mAP_50": 0.0, "caries_AP50": 0.0, "n_pred": 0}
-    m = evaluate_coco(coco_preds, GT_PATH)
+def _score_grid_point(loaded) -> dict:
+    """Score the loaded detector on EVAL_SPLIT at its CURRENT thresholds, via the
+    shared eval path. (Re-materializes GT + re-encodes per call — negligible next
+    to the GPU forward on the 50-image val split.)"""
+    m = score_model_on_split(
+        loaded, VOLUME_PATH, EVAL_SPLIT,
+        name_to_id=NAME_TO_ID, predict_chunk=PREDICT_CHUNK, verbose=False,
+    )
     return {
         "mAP_50": float(m["mAP_50"]),
         "caries_AP50": float(m.get("per_class_AP50", {}).get(CARIES_NAME, float("nan"))),
-        "n_pred": len(coco_preds),
+        "n_pred": int(m["num_predictions"]),
     }
 
 
@@ -182,11 +98,11 @@ best_per_backbone: dict[str, dict] = {}
 
 for backbone, cfg in COMPARE_BACKBONES.items():
     print(f"\n=== {backbone} ({cfg['model_short']}) ===")
-    loaded, uri = _load_detector(cfg["model_short"])
+    loaded, uri = load_detector_by_alias(f"{CATALOG}.{SCHEMA}.{cfg['model_short']}", ALIAS_PREFERENCE)
     if loaded is None:
         print(f"  no registered model for {backbone}; skipping")
         continue
-    dm = _inner_detection_model(loaded)
+    dm = inner_detection_model(loaded)
     base = (float(dm.score_threshold), float(dm.nms_iou_threshold), int(dm.max_detections))
     print(f"  loaded {uri}; as-registered thresholds score={base[0]} nms={base[1]} max_det={base[2]}")
 
@@ -195,7 +111,7 @@ for backbone, cfg in COMPARE_BACKBONES.items():
         dm.score_threshold = s
         dm.nms_iou_threshold = n
         dm.max_detections = d
-        res = _score(loaded)
+        res = _score_grid_point(loaded)
         row = {"backbone": backbone, "score": s, "nms_iou": n, "max_det": d, **res}
         rows.append(row)
         grid_rows.append(row)
@@ -204,11 +120,7 @@ for backbone, cfg in COMPARE_BACKBONES.items():
 
     rows_df = pd.DataFrame(rows).sort_values("mAP_50", ascending=False).reset_index(drop=True)
     best = rows_df.iloc[0].to_dict()
-    # Default (as-registered) row for the free-gain delta.
-    dflt = next(
-        (r for r in rows if (r["score"], r["nms_iou"], r["max_det"]) == base),
-        None,
-    )
+    dflt = next((r for r in rows if (r["score"], r["nms_iou"], r["max_det"]) == base), None)
     best_per_backbone[backbone] = {"best": best, "default": dflt, "uri": uri}
     print(f"  BEST mAP50={best['mAP_50']:.4f} @ score={best['score']} nms={best['nms_iou']} "
           f"max_det={best['max_det']} (caries_AP50={best['caries_AP50']:.4f})")
@@ -252,11 +164,7 @@ display(summary_df)
 # ---- Persist results (so they survive past the live cell outputs) ----
 # The job-run export strips cell stdout, so log a compact, queryable record to
 # MLflow AND return it as the notebook exit value for `jobs get-run-output`.
-_payload = {
-    "split": EVAL_SPLIT,
-    "grid": grid_rows,
-    "summary": summary,
-}
+_payload = {"split": EVAL_SPLIT, "grid": grid_rows, "summary": summary}
 try:
     mlflow.set_experiment(EXPERIMENT_NAME)  # from 00_config
 except Exception as _e:
@@ -281,5 +189,4 @@ with mlflow.start_run(run_name="eval-threshold-grid"):
     mlflow.log_artifact(_grid_json, artifact_path="threshold_grid")
 
 # COMMAND ----------
-Path(GT_PATH).unlink(missing_ok=True)
 dbutils.notebook.exit(json.dumps(_payload))

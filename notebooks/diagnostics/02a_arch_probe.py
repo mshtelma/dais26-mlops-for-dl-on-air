@@ -18,13 +18,13 @@
 # MAGIC Requires a **GPU** notebook (the ViT backbone loads onto CUDA).
 
 # COMMAND ----------
-# MAGIC %pip install --quiet ..
+# MAGIC %pip install --quiet ../..
 
 # COMMAND ----------
 dbutils.library.restartPython()
 
 # COMMAND ----------
-# MAGIC %run ./00_config
+# MAGIC %run ../00_config
 
 # COMMAND ----------
 import torch

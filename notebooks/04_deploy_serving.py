@@ -8,6 +8,7 @@
 # MAGIC
 # MAGIC This is the break-glass / manual deploy path; the primary promotion route is
 # MAGIC the `deploy_job_detector` deployment job (eval -> approval -> cross-schema promote).
+# MAGIC Vector Search index creation lives in `04b_create_vector_search.py`.
 
 # COMMAND ----------
 # MAGIC %pip install --quiet ..
@@ -83,97 +84,7 @@ if DEPLOY_ACTION == "deploy_and_smoke_test":
     print(f"Previous champion (capture for rollback): {result.previous_champion}")
 
 # COMMAND ----------
-
-if DEPLOY_ACTION == "create_vector_search":
-    # NOTE: a self-contained, always-on version of this logic lives in
-    # notebooks/04b_create_vector_search.py (run via the create_vector_search
-    # job). This branch is kept in sync with it.
-    import time
-
-    from databricks.sdk import WorkspaceClient
-    from databricks.sdk.service.vectorsearch import (
-        DeltaSyncVectorIndexSpecRequest,
-        EmbeddingVectorColumn,
-        EndpointType,
-        PipelineType,
-        VectorIndexType,
-    )
-
-    w = WorkspaceClient()
-
-    # Derive the embedding dimension from the source table so this stays correct
-    # regardless of backbone (C-RADIOv4-SO400M summary=2304, DINOv3-ViTL16=1024).
-    source_table = TRAIN_EMBEDDINGS_TABLE
-    embedding_dim = int(
-        spark.sql(f"SELECT size(embedding) AS d FROM {source_table} LIMIT 1").collect()[0]["d"]
-    )
-
-    # Create endpoint (if not exists)
-    try:
-        w.vector_search_endpoints.create_endpoint_and_wait(
-            name=VS_ENDPOINT_NAME, endpoint_type=EndpointType.STANDARD,
-        )
-        print(f"Created VS endpoint: {VS_ENDPOINT_NAME}")
-    except Exception as e:
-        if "already exists" in str(e).lower():
-            print(f"VS endpoint {VS_ENDPOINT_NAME} already exists")
-        else:
-            raise
-
-    # Create Delta Sync index with precomputed (self-managed) embeddings. The
-    # embedding_dimension is IMMUTABLE, so a backbone change between champions
-    # (C-RADIOv4 summary=2304, DINOv3=1024, DINOv2=768) requires a drop + recreate, not a
-    # sync — otherwise dim-mismatched vectors get synced into the stale index.
-    def _create_index(dim: int) -> None:
-        w.vector_search_indexes.create_index(
-            name=VS_INDEX_NAME,
-            endpoint_name=VS_ENDPOINT_NAME,
-            primary_key="image_id",
-            index_type=VectorIndexType.DELTA_SYNC,
-            delta_sync_index_spec=DeltaSyncVectorIndexSpecRequest(
-                source_table=source_table,
-                embedding_vector_columns=[
-                    EmbeddingVectorColumn(name="embedding", embedding_dimension=dim),
-                ],
-                pipeline_type=PipelineType.TRIGGERED,
-                columns_to_sync=["image_id", "diagnosis", "split"],
-            ),
-        )
-
-    def _existing_index_dim() -> int | None:
-        """Embedding dimension baked into the live index, or None if undiscoverable."""
-        idx = w.vector_search_indexes.get_index(index_name=VS_INDEX_NAME)
-        spec = getattr(idx, "delta_sync_index_spec", None)
-        cols = getattr(spec, "embedding_vector_columns", None) or []
-        for col in cols:
-            d = getattr(col, "embedding_dimension", None)
-            if d:
-                return int(d)
-        return None
-
-    print(f"Creating index {VS_INDEX_NAME} from {source_table} (dim={embedding_dim})")
-    try:
-        _create_index(embedding_dim)
-        print(f"Created VS index: {VS_INDEX_NAME}")
-    except Exception as e:
-        if "already exists" not in str(e).lower():
-            raise
-        existing_dim = _existing_index_dim()
-        if existing_dim is not None and existing_dim != embedding_dim:
-            print(
-                f"VS index {VS_INDEX_NAME} exists at dim={existing_dim} but the new "
-                f"champion's embeddings are dim={embedding_dim}; dropping + recreating."
-            )
-            w.vector_search_indexes.delete_index(index_name=VS_INDEX_NAME)
-            del_deadline = time.time() + 300
-            while time.time() < del_deadline:
-                try:
-                    w.vector_search_indexes.get_index(index_name=VS_INDEX_NAME)
-                    time.sleep(5)
-                except Exception:
-                    break
-            _create_index(embedding_dim)
-            print(f"Recreated VS index {VS_INDEX_NAME} at dim={embedding_dim}")
-        else:
-            print(f"VS index {VS_INDEX_NAME} already exists at matching dim={existing_dim}; syncing")
-            w.vector_search_indexes.sync_index(index_name=VS_INDEX_NAME)
+# The former `create_vector_search` action moved to its own always-on notebook,
+# notebooks/04b_create_vector_search.py (wired into deploy_champion_job's
+# create_vector_search task). The shared, dimension-aware create/sync logic is
+# dais26_dentex.serve.vector_search.ensure_vector_search_index.

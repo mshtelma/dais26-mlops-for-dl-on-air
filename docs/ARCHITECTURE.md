@@ -267,7 +267,7 @@ metric, and whether to register the winner are all config-driven via the `SWEEP_
 are unit-tested in isolation. The sweep job carries a **48-hour** timeout (`timeout_seconds:
 172800`) and runs on `GPU_8xH100`.
 
-> **Architecture audit first.** Before sweeping, run `notebooks/02a_arch_probe.py`. It builds a
+> **Architecture audit first.** Before sweeping, run `notebooks/diagnostics/02a_arch_probe.py`. It builds a
 > live detector and runs `models/arch_probe.probe_detection_model` to report anchor counts,
 > positive-anchor fraction per FPN level, delta-clamp overflow, and NMS mode, alongside the
 > static `KNOWN_ISSUES` register (e.g. every anchor scale emitted at every FPN level, which
@@ -693,7 +693,7 @@ src/dais26_dentex/
 │   │                          no_grad on whether the encoder is frozen)
 │   ├── targets.py            (anchor generator + target encoding; FPNLevel)
 │   ├── arch_probe.py         (read-only consistency probe + KNOWN_ISSUES register;
-│   │                          driven by notebooks/02a_arch_probe.py)
+│   │                          driven by notebooks/diagnostics/02a_arch_probe.py)
 │   └── peft.py               (LoRA on backbone QKV+proj; unfreeze_last_blocks for
 │                              backbone_mode=partial)
 │

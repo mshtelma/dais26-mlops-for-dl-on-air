@@ -141,7 +141,7 @@ P3–P6 (`src/dais26_dentex/models/detection_head.py`). So P3 (stride 8) gets 12
 P6 (stride 64) gets 16px anchors — most anchors are geometrically useless, the IoU matcher's
 positive fraction collapses, focal loss is starved. Flagged as the MAJOR issue in
 `src/dais26_dentex/models/arch_probe.py::KNOWN_ISSUES` and quantified live by
-`notebooks/02a_arch_probe.py` (`all_scales_every_level=True`, tiny `positive_fraction`).
+`notebooks/diagnostics/02a_arch_probe.py` (`all_scales_every_level=True`, tiny `positive_fraction`).
 
 External cross-reference (DENTEX papers, arXiv:2305.19112; RetinaNet/Focal-Loss reviews):
 RetinaNet baseline on DENTEX diagnosis ≈ **0.604 AP50**; top challenge teams ~0.68. RetinaNet
@@ -181,7 +181,7 @@ fix is a safety net here (no large-gt/small-anchor extreme in the first 4 images
 rather than a mover of this metric.
 
 Reproduce: pull `val.json` from the UC Volume and run the probe locally (CPU,
-fake backbone, 64x64 grid), or run `notebooks/02a_arch_probe.py` on a GPU node
+fake backbone, 64x64 grid), or run `notebooks/diagnostics/02a_arch_probe.py` on a GPU node
 for the full real-backbone pass.
 
 ## Fixes (shipped — drove 0.335 → 0.522)

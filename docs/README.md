@@ -190,7 +190,7 @@ C-RADIO / DINOv3 backbone:
 
 ```bash
 # 1. (recommended) audit the architecture first - anchors, positive ratio, NMS, delta clamp
-# Open notebooks/02a_arch_probe.py and run all.
+# Open notebooks/diagnostics/02a_arch_probe.py and run all.
 
 # 2. launch the sweep (single driver; pick a stage)
 databricks bundle run campaign_sweep -t dev -- --params sweep_stage=dinov3_s1

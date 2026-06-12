@@ -165,8 +165,51 @@ def score_model_on_split(
         Path(gt_path).unlink(missing_ok=True)
 
 
+def load_detector_by_alias(
+    full_model: str, alias_preference: tuple[str, ...]
+) -> tuple[Any | None, str | None]:
+    """Load a registered detector pyfunc by alias preference.
+
+    Tries ``models:/{full_model}@{alias}`` for each alias in order; returns the
+    first that loads (and its URI), else ``(None, None)``. Shared by
+    `09_eval_comparison` and `09b_eval_threshold_grid` (was an inline
+    `_load_detector` in each). `mlflow` is imported lazily so this module stays
+    importable without it.
+    """
+    import mlflow
+
+    for alias in alias_preference:
+        uri = f"models:/{full_model}@{alias}"
+        try:
+            return mlflow.pyfunc.load_model(uri), uri
+        except Exception as e:
+            print(f"  {uri}: unavailable ({type(e).__name__})")
+    return None, None
+
+
+def inner_detection_model(loaded: Any) -> Any:
+    """Reach the inner torch ``DetectionModel`` inside a loaded serving pyfunc.
+
+    Uses the public ``unwrap_python_model()`` when available (recent MLflow),
+    falling back to the private impl path. The returned model's
+    ``score_threshold`` / ``nms_iou_threshold`` / ``max_detections`` are the
+    inference-time knobs `09b`'s free threshold grid mutates between scorings.
+    """
+    pyfunc_model = None
+    if hasattr(loaded, "unwrap_python_model"):
+        try:
+            pyfunc_model = loaded.unwrap_python_model()
+        except Exception:
+            pyfunc_model = None
+    if pyfunc_model is None:
+        pyfunc_model = loaded._model_impl.python_model
+    return pyfunc_model.model
+
+
 __all__ = [
     "build_name_to_category_id",
+    "inner_detection_model",
+    "load_detector_by_alias",
     "materialize_gt",
     "model_output_row",
     "predict_split",

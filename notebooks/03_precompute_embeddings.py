@@ -21,24 +21,10 @@ dbutils.library.restartPython()
 # that to the backbone here and embed with the matching feature extractor. Falls
 # back to BACKBONE when there is no champion yet / no tag (e.g. first run, or a
 # standalone dev invocation).
-from mlflow.tracking import MlflowClient
+from dais26_dentex.config.champion import resolve_effective_backbone
 
-from dais26_dentex.config.champion import (
-    SOURCE_DEV_MODEL_TAG,
-    resolve_backbone_from_source_model,
-)
-
-_source_dev_model = None
-try:
-    _champ_mv = MlflowClient(registry_uri="databricks-uc").get_model_version_by_alias(
-        name=CHAMPION_MODEL_NAME, alias="champion"
-    )
-    _source_dev_model = (_champ_mv.tags or {}).get(SOURCE_DEV_MODEL_TAG)
-except Exception as e:
-    print(f"No resolvable @champion ({type(e).__name__}: {e}); falling back to BACKBONE={BACKBONE}")
-
-EFFECTIVE_BACKBONE = resolve_backbone_from_source_model(
-    _source_dev_model, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
+EFFECTIVE_BACKBONE, _source_dev_model = resolve_effective_backbone(
+    CHAMPION_MODEL_NAME, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
 )
 print(
     f"Embeddings backbone = {EFFECTIVE_BACKBONE} "

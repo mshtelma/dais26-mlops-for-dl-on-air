@@ -53,22 +53,10 @@ if DRIFT_MODE == "demo":
     # Using BACKBONE here produced 2304-dim query embeddings against a 1024-dim
     # kNN reference -> "X has 2304 features, but NearestNeighbors is expecting
     # 1024". Reverse-map the champion's source_dev_model tag to its backbone.
-    from mlflow.tracking import MlflowClient
-    from dais26_dentex.config.champion import (
-        SOURCE_DEV_MODEL_TAG,
-        resolve_backbone_from_source_model,
-    )
+    from dais26_dentex.config.champion import resolve_effective_backbone
 
-    _src = None
-    try:
-        _mv = MlflowClient(registry_uri="databricks-uc").get_model_version_by_alias(
-            name=CHAMPION_MODEL_NAME, alias="champion"
-        )
-        _src = (_mv.tags or {}).get(SOURCE_DEV_MODEL_TAG)
-    except Exception as e:
-        print(f"No resolvable @champion ({type(e).__name__}: {e}); falling back to BACKBONE={BACKBONE}")
-    EFFECTIVE_BACKBONE = resolve_backbone_from_source_model(
-        _src, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
+    EFFECTIVE_BACKBONE, _src = resolve_effective_backbone(
+        CHAMPION_MODEL_NAME, _DETECTOR_NAMES_BY_BACKBONE, BACKBONE
     )
     print(f"Drift backbone = {EFFECTIVE_BACKBONE} (champion source_dev_model={_src}, config BACKBONE={BACKBONE})")
 
