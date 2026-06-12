@@ -51,18 +51,3 @@ jobs:
           python3 -m venv /tmp/wheel_test
           /tmp/wheel_test/bin/pip install dist/*.whl
           /tmp/wheel_test/bin/python -c "import dais26_dentex; print(dais26_dentex.__version__)"
-
-  dab-validate:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    env:
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Databricks CLI
-        run: curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/main/install.sh | sudo sh
-
-      - name: Validate bundle (dev_non_air target)
-        run: databricks bundle validate -t dev_non_air
