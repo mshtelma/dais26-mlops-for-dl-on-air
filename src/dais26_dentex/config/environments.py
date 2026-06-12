@@ -62,7 +62,10 @@ ENVIRONMENTS: dict[str, dict[str, Any]] = {
         "catalog": "main",
         "schema": "mshtelma",
         "experiment_name": "/Users/michael.shtelma@databricks.com/dais26_vfm_experiment",
-        "champion_schema": "mshtelma_prod",
+        # df1's `main` catalog grants no CREATE SCHEMA, so the champion can't live
+        # in a separate `mshtelma_prod` schema — keep it in `mshtelma` (the champion
+        # is still a distinct model, `detector_champion`). prod keeps the real split.
+        "champion_schema": "mshtelma",
     },
     # The talk's nominal project workspace.
     "prod": {

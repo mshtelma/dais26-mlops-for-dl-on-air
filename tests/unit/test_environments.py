@@ -49,9 +49,10 @@ def test_default_env_is_df1_main_mshtelma() -> None:
     # volumes derive from catalog+schema
     assert env.volume_path == "/Volumes/main/mshtelma/dentex_raw"
     assert env.cache_dir == "/Volumes/main/mshtelma/model_cache"
-    # champion defaults: same catalog, explicit prod schema
+    # champion: same catalog; df1 keeps champion in the same schema (main has no
+    # CREATE SCHEMA for a separate mshtelma_prod), as a distinct model.
     assert env.champion_catalog == "main"
-    assert env.champion_schema == "mshtelma_prod"
+    assert env.champion_schema == "mshtelma"
     assert env.experiment_name.endswith("dais26_vfm_experiment")
 
 
