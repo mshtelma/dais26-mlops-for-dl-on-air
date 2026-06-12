@@ -38,21 +38,15 @@ code_source:
     # git:
     #   commit: <40-char SHA>
 
-# The stage carries ALL hyperparameters (config.campaigns.CAMPAIGN_STAGES —
-# the same stages 02b/campaign_sweep run); everything else here is
-# environment. Pick a stage at submit time:
+# Two names carry the config: stage (hyperparameters + search space,
+# config.campaigns.CAMPAIGN_STAGES) + env (UC locations, config.environments).
+# Both are the same sources 02b / campaign_sweep resolve. Pick a stage / target
+# at submit time:
 #   air run -f air/workload_sweep.yaml -p df1 \
-#     --override parameters.stage=cradio_s2
+#     --override parameters.stage=cradio_s2 parameters.env=prod
 parameters:                        # written by air to $HYPERPARAMETERS_PATH
   stage: dinov3_s1                 # config.campaigns.CAMPAIGN_STAGES name
-  catalog: mlops_pj
-  schema: dais26_vfm
-  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw
-  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache
-  # Shared MLflow experiment (same one the notebook lane and the gates use);
-  # distinct from the workload's own top-level experiment_name. Override per
-  # user via `--override parameters.experiment_name=...`.
-  experiment_name: /Users/michael.shtelma@databricks.com/dais26_vfm_experiment
+  env: df1                         # config.environments entry (pins the shared experiment)
 
 command: |-
   set -euxo pipefail

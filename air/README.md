@@ -18,12 +18,19 @@ spec to Databricks Serverless GPU and (with `--watch`) streams the logs back.
 | `workload_sweep.yaml` | HPO campaign stage via `train.sweep_cli` (same `SweepRunner` as notebook 02b). |
 | `requirements.yaml` | Python deps not in the AIR base env v4 image. |
 
-Hyperparameters are **not** listed in the workload YAMLs: each training workload
-names a **recipe** (`dais26_dentex.config.recipes.RECIPES` — the campaign-final
-best-known config, the same source the notebook lane builds from) and the sweep
-workload names a **stage** (`dais26_dentex.config.campaigns.CAMPAIGN_STAGES`).
-The `parameters:` blocks carry only environment values (catalog / schema / paths /
-experiment) plus explicit, deliberate overrides such as the demo-time `epochs`.
+Nothing is hand-mirrored in the workload YAMLs. Each training workload names a
+**recipe** (`dais26_dentex.config.recipes.RECIPES` — the campaign-final
+best-known hyperparameters) and the sweep workload names a **stage**
+(`dais26_dentex.config.campaigns.CAMPAIGN_STAGES`); both name an **environment**
+(`dais26_dentex.config.environments` — `env: df1` → catalog / schema /
+volume_path / cache_dir / experiment_name). All three are the SAME sources the
+notebook lane resolves, so the lanes cannot drift. A `parameters:` block is thus
+just `recipe`/`stage` + `env` plus explicit, deliberate overrides such as the
+demo-time `epochs` — no UC locations restated. Switch the whole target with
+`--override parameters.env=prod`; override one value with
+`--override parameters.schema=my_sandbox`; or drop a (non-git-ignored)
+`environments.local.yaml` at the repo root, which air's snapshot carries to the
+pod.
 
 ## One-time setup
 
@@ -64,11 +71,12 @@ The workload:
    -m dais26_dentex.train.cli` across the 8 H100s of one node — `air` exports the
    rendezvous env vars, so the same `command` scales to multi-node unchanged.
 5. The CLI reads `$HYPERPARAMETERS_PATH` (the `parameters:` block `air` wrote),
-   resolves the named `recipe:` from `config.recipes.RECIPES`, applies the YAML's
-   explicit overrides, builds + validates a `TrainerConfig`, and runs `Trainer`.
+   resolves the named `env:` (`config.environments`) and `recipe:`
+   (`config.recipes.RECIPES`), applies the YAML's explicit overrides, builds +
+   validates a `TrainerConfig`, and runs `Trainer`.
 6. The CLI clears the ambient `MLFLOW_RUN_ID` (`air` sets it for the workload's
    **own** run) so rank 0 logs the training run into the shared
-   `dais26_vfm_experiment` named by `parameters.experiment_name`, registers the
+   `dais26_vfm_experiment` (the named env's `experiment_name`), registers the
    model in UC, and sets `@challenger` — exactly what the notebook quickstart
    produces.
 
@@ -107,9 +115,14 @@ air run -f air/workload_train_detector.yaml \
   --override compute.num_accelerators=16 timeout_minutes=720 \
   --watch -p df1
 
-# Point a run at your own experiment:
+# Point a run at a different environment (catalog/schema/experiment all switch):
 air run -f air/workload_train_detector.yaml \
-  --override parameters.experiment_name=/Users/<you>/dais26_vfm_experiment \
+  --override parameters.env=prod \
+  --watch -p df1
+
+# ...or override a single location of the named env:
+air run -f air/workload_train_detector.yaml \
+  --override parameters.schema=my_sandbox \
   --watch -p df1
 ```
 
@@ -139,9 +152,12 @@ databricks secrets put-secret dais26-secrets hf-token
 ## Notes
 
 - **Two MLflow surfaces, deliberately distinct.** The workload's top-level
-  `experiment_name` / `mlflow_run_name` track the `air` run itself;
-  `parameters.experiment_name` aligns the **training** run into the shared
+  `experiment_name` / `mlflow_run_name` track the `air` run itself; the named
+  `env:`'s `experiment_name` aligns the **training** run into the shared
   `dais26_vfm_experiment` the sweep / deployment-job gates read.
+- **One env, both lanes.** `parameters: { env: df1 }` resolves the same
+  `config.environments` entry `00_config.py` selects — so catalog / schema /
+  volumes / experiment can't drift between the notebook and air lanes.
 - **Multi-node** is just a bigger `compute.num_accelerators` (16 / 24 / 32) —
   `air` spreads it across nodes and the `command`'s `$NUM_NODES` /
   `$LOCAL_WORLD_SIZE` / `$NODE_RANK` arithmetic feeds torchrun correctly.

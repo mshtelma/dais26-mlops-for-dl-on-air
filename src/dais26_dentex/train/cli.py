@@ -4,12 +4,13 @@ Reads `$HYPERPARAMETERS_PATH` (a YAML file the AIR CLI writes from the workload'
 `parameters:` block), builds a `TrainerConfig`, and runs `Trainer(cfg).run()`
 directly.
 
-The YAML may name a `recipe:` (a backbone literal from `config.recipes.RECIPES`)
-— the best-known hyperparameters for that backbone are then the base, and every
-other YAML key is an explicit override on top. This is what keeps the air
-workload `parameters:` block down to environment values (catalog/schema/paths/
-experiment) instead of a hand-maintained mirror of the notebook constants; both
-launch lanes consume the same recipe.
+The YAML may name an `env:` (a `config.environments` entry — catalog / schema /
+volume_path / cache_dir / experiment_name) and a `recipe:` (a backbone literal
+from `config.recipes.RECIPES` — the best-known hyperparameters). Each expands
+into defaults that the remaining YAML keys override. This is what keeps the air
+workload `parameters:` block down to two names plus a deliberate override or
+two, instead of a hand-maintained mirror of the notebook constants; both launch
+lanes resolve the same env + recipe.
 
 Coercion of stringly-typed YAML values lives on the dataclass
 (`TrainerConfig.from_dict`), so adding a new knob is a one-line change to
@@ -30,6 +31,7 @@ import sys
 
 import yaml
 
+from dais26_dentex.config.environments import load_environment
 from dais26_dentex.config.recipes import RECIPES, build_trainer_config
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.distributed import is_rank0
@@ -41,24 +43,33 @@ logger = logging.getLogger(__name__)
 def load_config(yaml_path: str) -> TrainerConfig:
     """Build a TrainerConfig from a (air-written) parameters YAML.
 
-    With a `recipe:` key: start from `RECIPES[recipe]`, derive the model name,
-    and apply every remaining YAML key as an override. Without one: the YAML
-    must carry the full config (legacy behavior).
+    Two optional resolution keys, each mirroring the notebook lane: `env:`
+    names a `config.environments` entry (catalog / schema / volume_path /
+    cache_dir / experiment_name), and `recipe:` names a `config.recipes` entry
+    (hyperparameters). Each expands into defaults that the YAML's remaining
+    keys override (explicit always wins). Without either, the YAML must carry a
+    full config (legacy behavior).
     """
     with open(yaml_path) as f:
         raw = yaml.safe_load(f) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"YAML at {yaml_path} did not produce a mapping; got {type(raw).__name__}")
     recipe = raw.pop("recipe", None)
+    env_name = raw.pop("env", None)
+    if env_name is not None:
+        # Environment locations are defaults; explicit YAML keys still win.
+        raw = {**load_environment(env_name).as_training_kwargs(), **raw}
     if recipe is None:
-        return TrainerConfig.from_yaml(yaml_path)
+        return TrainerConfig.from_dict(raw)
     if recipe not in RECIPES:
         raise ValueError(f"Unknown recipe {recipe!r}; known: {sorted(RECIPES)}")
     try:
         catalog = raw.pop("catalog")
         schema = raw.pop("schema")
     except KeyError as e:
-        raise ValueError(f"recipe-based config still requires {e.args[0]!r} in parameters") from e
+        raise ValueError(
+            f"recipe-based config requires {e.args[0]!r} (set it directly or via env:)"
+        ) from e
     return build_trainer_config(recipe, catalog=catalog, schema=schema, **raw)
 
 

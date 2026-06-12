@@ -322,10 +322,10 @@ Budget 7 minutes. Run 1-2 epochs live; switch to a pre-baked run for epochs 3-10
    - "There's one training core: `Trainer` in `src/dais26_dentex/train/trainer.py`. The notebook
      dispatches it via `serverless_gpu.@distributed`. **the AIR CLI runs the same core via
      torchrun** — `air/workload_train_detector.yaml` just says `recipe: cradio_v4_so400m`
-     plus environment values; the CLI resolves the identical recipe through
-     `$HYPERPARAMETERS_PATH`. Two surfaces, one core, one recipe. Even the HPO sweep runs
-     on both: `campaign_sweep` (DAB) and `workload_sweep.yaml` (terminal) drive the same
-     `SweepRunner`."
+     and `env: df1`; the CLI resolves the identical recipe (hyperparameters) and env (UC
+     locations) through `$HYPERPARAMETERS_PATH` — the SAME two names `00_config.py` selects.
+     Two surfaces, one core, one recipe, one env. Even the HPO sweep runs on both:
+     `campaign_sweep` (DAB) and `workload_sweep.yaml` (terminal) drive the same `SweepRunner`."
 5. After 2 epochs: switch to the pre-baked MLflow run (epochs 3-10 pre-logged).
 6. Show the val/mAP@50 curve. Target: ≥ 0.45 after 10 epochs.
 7. Show the UC model registration: `mlops_pj.dais26_vfm.cradio_detector`, `@challenger` alias.

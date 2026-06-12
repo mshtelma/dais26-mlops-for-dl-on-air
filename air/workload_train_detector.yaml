@@ -42,27 +42,22 @@ code_source:
     # git:
     #   commit: <40-char SHA>      # XOR `branch: <name>` (local HEAD of branch)
 
-# Hyperparameters come from the named recipe — the SAME source the notebook
-# quickstart uses (`dais26_dentex.config.recipes.RECIPES`), so the two launch
-# surfaces cannot drift. Everything below the recipe line is environment
-# (where to read/write) or an explicit, deliberate override. Override at submit
-# time without editing this file, e.g.:
+# Two names carry everything that used to be a dozen hand-mirrored keys:
+#   recipe — hyperparameters     (config.recipes.RECIPES)
+#   env    — UC locations        (config.environments.ENVIRONMENTS: catalog /
+#            schema / volume_path / cache_dir / experiment_name)
+# Both are the SAME sources the notebook quickstart resolves, so the two launch
+# surfaces cannot drift. `env` pins the TRAINING run into the shared
+# dais26_vfm_experiment the sweep / deployment-job gates read (distinct from the
+# workload's own top-level `experiment_name`). Everything else here is a
+# deliberate override. Override at submit time without editing this file:
 #   air run -f air/workload_train_detector.yaml -p df1 \
-#     --override parameters.epochs=150 parameters.experiment_name=/Users/<you>/dais26_vfm_experiment
+#     --override parameters.env=prod parameters.epochs=150
+# (or override one value: `--override parameters.schema=my_sandbox`.)
 parameters:                        # written by air to $HYPERPARAMETERS_PATH
   recipe: cradio_v4_so400m         # config.recipes literal, NOT the HF id
-  catalog: mlops_pj
-  schema: dais26_vfm
+  env: df1                         # config.environments entry
   backbone_revision: main          # pin a 40-char SHA for reproducible runs
-  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw
-  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache
-  # MLflow experiment the TRAINING RUN logs to — must match the bundle-managed
-  # experiment the notebook lane uses, or the sweep / deployment-job
-  # best-in-experiment gates will not see air-trained versions. This is
-  # deliberately distinct from the workload's top-level `experiment_name`
-  # (the AIR CLI's own run tracking). Override per user via
-  # `--override parameters.experiment_name=...`.
-  experiment_name: /Users/michael.shtelma@databricks.com/dais26_vfm_experiment
   register_model: true
   set_candidate_alias: true
   # Demo-time override: the recipe's full schedule is 150 epochs (the

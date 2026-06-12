@@ -16,7 +16,25 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from dais26_dentex.config.environments import load_environment
 from dais26_dentex.train import cli
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_dais26_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `env:` resolution deterministic: clear any ambient DAIS26_* and
+    point the overlay at a missing path so tests see the committed named
+    environments only."""
+    for var in (
+        "DAIS26_ENV",
+        "DAIS26_CATALOG",
+        "DAIS26_SCHEMA",
+        "DAIS26_EXPERIMENT",
+        "DAIS26_VOLUME_PATH",
+        "DAIS26_CACHE_DIR",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DAIS26_ENV_FILE", "/nonexistent/dais26-no-overlay.yaml")
 
 
 class _FakeTrainer:
@@ -300,3 +318,43 @@ def test_load_config_recipe_requires_catalog_and_schema(tmp_path: Path) -> None:
     p.write_text(yaml.safe_dump({"recipe": "cradio_v4_so400m", "schema": "s"}))
     with pytest.raises(ValueError, match="catalog"):
         cli.load_config(str(p))
+
+
+# --- load_config: env resolution ------------------------------------------
+
+
+def test_load_config_env_resolves_uc_locations(tmp_path: Path) -> None:
+    """`env: df1` supplies catalog/schema/volume/experiment so the workload
+    YAML need not restate them — the same df1 the notebook lane resolves."""
+    p = tmp_path / "hp.yaml"
+    p.write_text(yaml.safe_dump({"recipe": "cradio_v4_so400m", "env": "df1", "epochs": 2}))
+    cfg = cli.load_config(str(p))
+    df1 = load_environment("df1")
+    assert cfg.catalog == df1.catalog == "main"
+    assert cfg.schema == df1.schema == "mshtelma"
+    assert cfg.volume_path == df1.volume_path
+    assert cfg.experiment_name == df1.experiment_name
+    assert cfg.anchor_layout == "per_level"  # recipe still applied on top of env
+    assert cfg.epochs == 2
+
+
+def test_load_config_explicit_key_overrides_env(tmp_path: Path) -> None:
+    p = tmp_path / "hp.yaml"
+    p.write_text(
+        yaml.safe_dump(
+            {"recipe": "cradio_v4_so400m", "env": "df1", "schema": "override_schema", "epochs": 2}
+        )
+    )
+    cfg = cli.load_config(str(p))
+    assert cfg.catalog == "main"  # from env
+    assert cfg.schema == "override_schema"  # explicit YAML key wins
+
+
+def test_load_config_env_without_recipe(tmp_path: Path) -> None:
+    """`env:` works on the legacy (no-recipe) path too."""
+    p = tmp_path / "hp.yaml"
+    p.write_text(yaml.safe_dump({"env": "prod", "epochs": 3}))
+    cfg = cli.load_config(str(p))
+    assert cfg.catalog == "mlops_pj"
+    assert cfg.schema == "dais26_vfm"
+    assert cfg.anchor_layout == "absolute"  # no recipe → legacy defaults

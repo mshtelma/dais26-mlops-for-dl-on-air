@@ -17,9 +17,26 @@ from typing import Any
 import pytest
 import yaml
 
+from dais26_dentex.config.environments import load_environment
 from dais26_dentex.config.recipes import DETECTOR_NAMES_BY_BACKBONE, RECIPES
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.train import cli
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_dais26_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`env: df1` must resolve to the committed environment, not a tester's
+    ambient DAIS26_* / overlay."""
+    for var in (
+        "DAIS26_ENV",
+        "DAIS26_CATALOG",
+        "DAIS26_SCHEMA",
+        "DAIS26_EXPERIMENT",
+        "DAIS26_VOLUME_PATH",
+        "DAIS26_CACHE_DIR",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DAIS26_ENV_FILE", "/nonexistent/dais26-no-overlay.yaml")
 
 REPO = Path(__file__).resolve().parents[2]
 DAB_TRAIN_JOB = REPO / "resources" / "jobs" / "train_detector.yml"
@@ -33,13 +50,11 @@ AIR_WORKLOADS = {
 # than hyperparameters. Anything else in `parameters:` must be a TrainerConfig
 # field deliberately overriding the recipe — and the recipe-critical knobs may
 # not be silently overridden at all.
+# UC locations now collapse to a single `env:` key (config.environments); the
+# remaining non-hyperparameter keys are model identity + launch flags.
 ENV_KEYS = {
     "recipe",
-    "catalog",
-    "schema",
-    "volume_path",
-    "cache_dir",
-    "experiment_name",
+    "env",
     "model_name",
     "backbone_revision",
     "register_model",
@@ -131,8 +146,10 @@ def test_air_parameters_are_recipe_plus_environment_only(backbone: str) -> None:
     assert params["recipe"] == backbone
     assert params["recipe"] in RECIPES
 
+    # `recipe` and `env` are resolution keys, not TrainerConfig fields; every
+    # other parameter must be a real field (the air CLI would silently drop a typo).
     trainer_fields = {f.name for f in fields(TrainerConfig)}
-    unknown = set(params) - trainer_fields - {"recipe"}
+    unknown = set(params) - trainer_fields - {"recipe", "env"}
     assert not unknown, f"parameters not understood by TrainerConfig: {unknown}"
 
     overrides = set(params) - ENV_KEYS
@@ -145,9 +162,9 @@ def test_air_parameters_are_recipe_plus_environment_only(backbone: str) -> None:
         f"{set(params) & RECIPE_CRITICAL}"
     )
 
-    # The MLflow experiment must be pinned so air-trained versions are
+    # The named env must pin the MLflow experiment so air-trained versions are
     # visible to the sweep / deployment-job best-in-experiment gates.
-    assert params["experiment_name"].endswith("dais26_vfm_experiment")
+    assert load_environment(params["env"]).experiment_name.endswith("dais26_vfm_experiment")
 
 
 @pytest.mark.parametrize("backbone", sorted(AIR_WORKLOADS))
@@ -171,4 +188,7 @@ def test_air_parameters_resolve_through_the_shared_recipe(backbone: str, tmp_pat
     recipe = RECIPES[backbone]
     assert cfg.lr == pytest.approx(recipe["lr"])
     assert cfg.batch_size == recipe["batch_size"]
-    assert cfg.experiment_name == params["experiment_name"]
+    # UC locations come from the named env, not restated in the workload.
+    env = load_environment(params["env"])
+    assert cfg.catalog == env.catalog
+    assert cfg.experiment_name == env.experiment_name

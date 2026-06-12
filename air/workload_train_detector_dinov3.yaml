@@ -46,27 +46,18 @@ code_source:
     # git:
     #   commit: <40-char SHA>      # XOR `branch: <name>` (local HEAD of branch)
 
-# Hyperparameters come from the named recipe — `dinov3_vitl16` resolves to the
-# dinov3_final campaign winner (capricious-hound-240, val mAP@50 0.5738):
-# multi-layer fusion [6,12,18,24], 1280px, fp32 via amp "auto", batch 2 +
-# grad-accum 2. Same source as the notebook quickstart, so the lanes cannot
-# drift. Override at submit time, e.g.:
+# Two names carry the config: recipe (hyperparameters) + env (UC locations,
+# config.environments). `dinov3_vitl16` resolves to the dinov3_final campaign
+# winner (capricious-hound-240, val mAP@50 0.5738): multi-layer fusion
+# [6,12,18,24], 1280px, fp32 via amp "auto", batch 2 + grad-accum 2. Both are
+# the SAME sources the notebook quickstart resolves, so the lanes cannot drift.
+# Override at submit time, e.g.:
 #   air run -f air/workload_train_detector_dinov3.yaml -p df1 \
-#     --override parameters.epochs=150
+#     --override parameters.env=prod parameters.epochs=150
 parameters:                        # written by air to $HYPERPARAMETERS_PATH
   recipe: dinov3_vitl16            # config.recipes literal, NOT the HF id
-  catalog: mlops_pj
-  schema: dais26_vfm
+  env: df1                         # config.environments entry (pins the shared experiment)
   backbone_revision: main          # pin a 40-char SHA for reproducible runs
-  volume_path: /Volumes/mlops_pj/dais26_vfm/dentex_raw
-  cache_dir: /Volumes/mlops_pj/dais26_vfm/model_cache
-  # MLflow experiment the TRAINING RUN logs to — must match the bundle-managed
-  # experiment the notebook lane uses, or the sweep / deployment-job
-  # best-in-experiment gates will not see air-trained versions. This is
-  # deliberately distinct from the workload's top-level `experiment_name`
-  # (the AIR CLI's own run tracking). Override per user via
-  # `--override parameters.experiment_name=...`.
-  experiment_name: /Users/michael.shtelma@databricks.com/dais26_vfm_experiment
   register_model: true
   set_candidate_alias: true
   # Demo-time override: the recipe's full schedule is 150 epochs; 50 keeps the

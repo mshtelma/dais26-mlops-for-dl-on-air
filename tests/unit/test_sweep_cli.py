@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from dais26_dentex.config.campaigns import CAMPAIGN_STAGES
+from dais26_dentex.config.environments import ENVIRONMENTS, load_environment
 from dais26_dentex.train import sweep_cli
 
 REPO = Path(__file__).resolve().parents[2]
@@ -51,6 +52,25 @@ def test_load_sweep_inputs_strategy_and_seed_are_consumed(tmp_path: Path) -> Non
     assert spec.strategy == "grid"
     assert spec.seed == 7
     assert "strategy" not in base and "seed" not in base
+
+
+def test_load_sweep_inputs_env_resolves_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`env: df1` supplies the UC locations into the base kwargs, so the sweep
+    workload need not restate catalog/schema/volume/experiment."""
+    for var in ("DAIS26_ENV", "DAIS26_CATALOG", "DAIS26_SCHEMA", "DAIS26_EXPERIMENT"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("DAIS26_ENV_FILE", "/nonexistent/dais26-no-overlay.yaml")
+    path = _write(tmp_path, {"stage": "dinov3_s1", "env": "df1"})
+    spec, base = sweep_cli.load_sweep_inputs(path)
+    df1 = load_environment("df1")
+    assert base["catalog"] == df1.catalog == "main"
+    assert base["schema"] == df1.schema == "mshtelma"
+    assert base["experiment_name"] == df1.experiment_name
+    assert base["volume_path"] == df1.volume_path
+    assert "env" not in base  # consumed, not forwarded into TrainerConfig
+    assert spec.backbone == "dinov3_vitl16"
 
 
 def test_load_sweep_inputs_requires_stage(tmp_path: Path) -> None:
@@ -117,7 +137,11 @@ def test_sweep_workload_parameters_are_stage_plus_environment() -> None:
     with SWEEP_WORKLOAD.open() as f:
         params = yaml.safe_load(f)["parameters"]
     assert params["stage"] in CAMPAIGN_STAGES
-    allowed = {"stage", "catalog", "schema", "volume_path", "cache_dir", "experiment_name",
-               "model_name", "backbone_revision", "strategy", "seed"}
+    assert params["env"] in ENVIRONMENTS
+    allowed = {"stage", "env", "model_name", "backbone_revision", "strategy", "seed"}
     assert set(params) <= allowed, f"unexpected sweep workload params: {set(params) - allowed}"
-    assert params["experiment_name"].endswith("dais26_vfm_experiment")
+    # UC locations come from the named env, not restated in the workload.
+    restated = {"catalog", "schema", "volume_path", "cache_dir", "experiment_name"} & set(params)
+    assert not restated, f"sweep workload restates env-derived keys: {restated}"
+    # the named env must pin the shared experiment the gates read
+    assert load_environment(params["env"]).experiment_name.endswith("dais26_vfm_experiment")

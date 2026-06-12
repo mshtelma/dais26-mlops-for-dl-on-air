@@ -746,6 +746,7 @@ src/dais26_dentex/
 |---|---|---|
 | Manifest v2 | `config/manifest.py` | One `manifest.json` (version first → `head -1` triages a model) replaces v1's three sidecar JSONs. `load_manifest` raises `IncompatibleArtifactError` on v1 with a one-shot migration hint. |
 | TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and the air lane's torchrun. |
+| Named config (`recipe` / `env` / stage) | `config/recipes.py`, `config/environments.py`, `config/campaigns.py` | Both lanes select hyperparameters, UC locations, and sweep stages **by name** (in-wheel, so air pods and notebooks resolve the identical dicts) — the DAB↔air harmonization. A target or recipe switch is one token (`env: df1`, `recipe: cradio_v4_so400m`), never a re-statement of values; a non-git-ignored `environments.local.yaml` overlay rides air's snapshot for per-user targets. |
 | `safe_barrier` | `distributed/primitives.py` | Bounded `wait()` over `dist.barrier(async_op=True)` — surfaces `BarrierTimeoutError` instead of hanging on NCCL when a peer rank crashed. |
 | `rank0_first` | `distributed/barrier_dance.py` | Non-rank-0 hits its barrier first, rank 0 does the work and then hits its barrier; trailing symmetric barrier. Pattern fixes the cold-cache HF download race. |
 | `configure_hf_env` | `platform/hf_env.py` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` — UC Volume FUSE rejects parallel chunked writes. |
@@ -758,9 +759,11 @@ src/dais26_dentex/
 
 ## Unity Catalog resource map
 
-Names are config-driven from `notebooks/00_config.py` (`CATALOG`, `SCHEMA`, `TABLE_PREFIX`, and the
-backbone-keyed model/endpoint names). Current defaults: catalog `mlops_pj`, schema `dais26_vfm`,
-table/index prefix `dais26_dentex_`, backbone `cradio_v4_so400m`. The table below uses the legacy
+Names are config-driven: UC locations from the named environment in `config/environments.py`
+(selected by `ENV` in `notebooks/00_config.py`), with `TABLE_PREFIX` and the backbone-keyed
+model/endpoint names from `00_config.py`. The default `ENV = "df1"` resolves to catalog `main`,
+schema `mshtelma`; `ENV = "prod"` → `mlops_pj` / `dais26_vfm`. Table/index prefix `dais26_dentex_`,
+backbone `cradio_v4_so400m`. The table below uses the legacy
 `ml`/`cradio_detector` names for illustration.
 
 | Resource type | Full name | Notes |

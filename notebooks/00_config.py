@@ -4,13 +4,25 @@
 # MAGIC
 # MAGIC `%run ./00_config` from any other notebook to pull in shared UC config,
 # MAGIC derived paths, table FQNs, model names, endpoint names, and the MLflow
-# MAGIC experiment path. **All values are configured here directly** — edit this
-# MAGIC notebook to switch catalogs / schemas / backbones.
+# MAGIC experiment path. UC locations come from a **named environment**
+# MAGIC (`config.environments`, the SAME source the air lane resolves) — set
+# MAGIC `ENV` below to switch targets; backbone + per-notebook knobs are here.
 
 # COMMAND ----------
-# ---- Core UC config (edit here to switch environments) ----
-CATALOG = "mlops_pj"
-SCHEMA = "dais26_vfm"
+# ---- Environment selection (the ONE place to switch targets) ----
+# `ENV` names a `config.environments` entry — the SAME named environment the air
+# lane resolves via `parameters: { env: <name> }`, so UC locations (catalog /
+# schema / volumes / experiment / champion schema) cannot drift between the two
+# launch lanes. Switch targets by changing this token, or without editing this
+# file via $DAIS26_ENV / an environments.local.yaml overlay / $DAIS26_CATALOG
+# (the loader honors all three — see src/dais26_dentex/config/environments.py).
+from dais26_dentex.config.environments import load_environment
+
+ENV = "df1"
+_env = load_environment(ENV)
+
+CATALOG = _env.catalog
+SCHEMA = _env.schema
 BACKBONE = "cradio_v4_so400m"
 BACKBONE_REVISION = "main"
 
@@ -18,21 +30,22 @@ BACKBONE_REVISION = "main"
 # Dev models (with @challenger) live in CATALOG.SCHEMA; the promote task copies
 # the approved version into a SEPARATE prod/broad schema and registers it as
 # @champion there (lineage back to the source run is preserved via
-# MlflowClient.copy_model_version). Same catalog by default; can become a
-# separate catalog later without touching the rest of the code.
-CHAMPION_CATALOG = "mlops_pj"
-CHAMPION_SCHEMA = "dais26_vfm_prod"
+# MlflowClient.copy_model_version). Both derive from the named environment
+# (champion_catalog defaults to catalog; champion_schema to "<schema>_prod"), so
+# switching ENV moves the whole dev+prod tier together.
+CHAMPION_CATALOG = _env.champion_catalog
+CHAMPION_SCHEMA = _env.champion_schema
 
 # Table-name prefix so multiple DAIS26 projects can share one schema without colliding.
 TABLE_PREFIX = "dais26_dentex_"
 
 # COMMAND ----------
-# ---- Volume names + derived paths ----
-DENTEX_VOLUME = "dentex_raw"
-MODEL_CACHE_VOLUME = "model_cache"
+# ---- Volume names + derived paths (from the named environment) ----
+DENTEX_VOLUME = _env.dentex_volume
+MODEL_CACHE_VOLUME = _env.model_cache_volume
 
-VOLUME_PATH = f"/Volumes/{CATALOG}/{SCHEMA}/{DENTEX_VOLUME}"
-CACHE_DIR = f"/Volumes/{CATALOG}/{SCHEMA}/{MODEL_CACHE_VOLUME}"
+VOLUME_PATH = _env.volume_path
+CACHE_DIR = _env.cache_dir
 
 # COMMAND ----------
 # ---- UC Delta tables (all prefixed with TABLE_PREFIX) ----
@@ -101,22 +114,15 @@ VS_ENDPOINT_NAME = "dais26-vfm-vs"
 VS_INDEX_NAME = f"{CHAMPION_CATALOG}.{CHAMPION_SCHEMA}.{TABLE_PREFIX}embeddings_index"
 
 # COMMAND ----------
-# ---- MLflow experiment ----
-# Use the dbutils notebook context (no spark — AIR workers don't have spark, and
-# the driver's spark.sql round-trip is unnecessary when dbutils gives us the
-# username directly).
-#
-# Point at the BUNDLE-MANAGED experiment (resources/experiments/vfm_experiment.yml,
-# name "/Users/${workspace.current_user.userName}/dais26_vfm_experiment") so every
-# training run, the HPO sweep, and the lineage-preserving champion copy all share
-# one experiment root that the DAB owns. Keeping the literal in sync with the YAML
-# means the deployment job's best-in-experiment gate (notebooks/10) reads the same
-# experiment the trainer logs to. (Still per-user today; when prod runs as the SP,
-# repoint both this and the YAML at a shared project-folder experiment.)
-_current_user = (
-    dbutils.notebook.entry_point.getDbutils().notebook().getContext().userName().get()
-)
-EXPERIMENT_NAME = f"/Users/{_current_user}/dais26_vfm_experiment"
+# ---- MLflow experiment (from the named environment) ----
+# Sourced from `config.environments` so the notebook lane, the air lane, and the
+# deployment-job best-in-experiment gate (notebooks/10) all log to / read the
+# SAME experiment. (Previously derived from the dbutils current-user, which only
+# worked in-notebook and could silently diverge from the air workloads' literal;
+# the env makes it ONE source for both lanes.) Must match the bundle-managed
+# experiment in resources/experiments/vfm_experiment.yml for the deploying user;
+# override per-user via environments.local.yaml or $DAIS26_EXPERIMENT.
+EXPERIMENT_NAME = _env.experiment_name
 
 # COMMAND ----------
 # ---- Backbone literals (canonical internal names for dais26_dentex.models.backbones) ----
@@ -195,6 +201,7 @@ LATENCY_WARMUP_REQUESTS = 20
 LATENCY_PIVOT_THRESHOLD_MS = 150.0
 
 # COMMAND ----------
+print(f"ENV              = {ENV}")
 print(f"CATALOG          = {CATALOG}")
 print(f"SCHEMA           = {SCHEMA}")
 print(f"BACKBONE         = {BACKBONE} @ {BACKBONE_REVISION}")

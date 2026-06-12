@@ -38,23 +38,27 @@ uv pip install -e ".[dev]"
 ```
 
 This installs all runtime and dev dependencies (torch, transformers, mlflow, databricks-sdk, etc.)
-in editable mode so changes to `src/dais26_dentex/` are immediately reflected. Environment values
-(UC names, experiment, demo-time overrides) live in `notebooks/00_config.py`; training
-hyperparameters come from the per-backbone recipes in `dais26_dentex.config.recipes` — shared with
-the air lane. The only job-parameter exceptions are `sweep_stage` and `deploy_action`, which jobs
-pass as `base_parameters` so one job definition serves every campaign stage / deploy mode.
+in editable mode so changes to `src/dais26_dentex/` are immediately reflected. UC locations come
+from a **named environment** (`dais26_dentex.config.environments`, selected by `ENV` in
+`notebooks/00_config.py` — the same `env:` the air lane names); training hyperparameters come from
+the per-backbone recipes in `dais26_dentex.config.recipes`. Both are shared with the air lane, so
+the lanes cannot drift. The only job-parameter exceptions are `sweep_stage` and `deploy_action`,
+which jobs pass as `base_parameters` so one job definition serves every campaign stage / deploy mode.
 
-**All UC names are config-driven from `notebooks/00_config.py`.** The current defaults are:
+**UC locations resolve from `config/environments.py` via the `ENV` selector in
+`notebooks/00_config.py`** (or, without editing, `$DAIS26_ENV` / an `environments.local.yaml`
+overlay / `$DAIS26_*` env vars — the air lane honors the same). The default `ENV = "df1"` resolves to:
 
-| Config knob | Default | Drives |
-|-------------|---------|--------|
-| `CATALOG` | `mlops_pj` | catalog for all schemas/tables/models |
-| `SCHEMA` | `dais26_vfm` | schema |
+| Config knob | `df1` value | Drives |
+|-------------|-------------|--------|
+| `ENV` | `df1` | selects the named environment (catalog / schema / volumes / experiment / champion schema) |
+| `CATALOG` | `main` (from env) | catalog for all schemas/tables/models |
+| `SCHEMA` | `mshtelma` (from env) | schema |
 | `TABLE_PREFIX` | `dais26_dentex_` | table/index prefix so multiple projects share one schema (e.g. `dais26_dentex_train_embeddings`) |
 | `BACKBONE` | `cradio_v4_so400m` | backbone + the backbone-keyed model/endpoint names (`cradio_detector`, `dais26-cradio-detector-dev`) |
 
-Switch `BACKBONE` to `dinov3_vitl16` for the gated DINOv3 comparison path. The command examples below
-use the legacy `ml_dev` / `cradio_detector` names; substitute your configured values.
+Switch targets with `ENV = "prod"` (→ `mlops_pj` / `dais26_vfm`) or add your own entry to
+`ENVIRONMENTS`. Switch `BACKBONE` to `dinov3_vitl16` for the gated DINOv3 comparison path.
 
 ### Step 3 — Authenticate with Databricks
 

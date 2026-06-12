@@ -438,8 +438,9 @@ are byte-identical:
   optimizer step (the OneCycle scheduler now steps once per *optimizer* step).
   Lets fp32 DINOv3 keep a large effective batch at 1280px with `batch_size=2`.
 
-Campaign stages live in `CAMPAIGN_STAGES` (`notebooks/00_config.py`); the 02b
-sweep harness honors a `sweep_stage` widget / job parameter. New launchable jobs:
+Campaign stages live in `CAMPAIGN_STAGES` (`config/campaigns.py`, selected by
+`SWEEP_STAGE` in `notebooks/00_config.py`); the 02b sweep harness honors a
+`sweep_stage` widget / job parameter. New launchable jobs:
 `resources/jobs/campaign_sweep.yml` (parametrized by `sweep_stage`,
 `max_concurrent_runs: 2` so two stages can share the GPU pool) and
 `resources/jobs/eval_threshold_grid.yml` (the free grid, single A10,

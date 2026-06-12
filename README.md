@@ -95,10 +95,11 @@ air list runs --limit 10 -p df1
 air logs <run-id> -p df1
 ```
 
-Both paths share **one core and one config source**: hyperparameters come from
-the per-backbone recipe in `config/recipes.py` (the workload YAML just names it
-— `recipe: cradio_v4_so400m` — plus environment values), and execution is
-`src/dais26_dentex/train/trainer.py::Trainer`, which is distributed-aware
+Both paths share **one core and two named-config sources**: hyperparameters from
+the per-backbone recipe in `config/recipes.py` and UC locations from the named
+environment in `config/environments.py` — the workload YAML just names both
+(`recipe: cradio_v4_so400m`, `env: df1`), the notebook resolves the identical
+pair, and execution is `src/dais26_dentex/train/trainer.py::Trainer`, distributed-aware
 (DDP, rank-0-only MLflow + UC registration) under both `@distributed` and
 `torchrun`. Both lanes log to the same MLflow experiment, so the promotion
 gates treat their runs identically. See [air/README.md](air/README.md).
@@ -172,7 +173,7 @@ dais26-mlops-for-dl-on-air/
 |       |-- platform/       # hf_env, mlflow_io (MlflowReporter, serving_pip_requirements), uc (UCName)
 |       |-- serve/          # detector_pyfunc.py, detector_model_script.py (models-from-code loader), embedder_pyfunc.py, postprocess.py, endpoint_manager.py
 |       `-- train/          # trainer.py (Trainer class), losses, sweep + sweep_runner (HPO brain), cli + sweep_cli (air entries)
-|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; env values via 00_config.py, hyperparameters via config/recipes.py
+|-- notebooks/              # 00_config / 00_setup .. 09_eval_comparison / 09b_eval_threshold_grid / 10_deploy_eval_task / 11_deploy_approval_task / 12_promote_task / 13_connect_deployment_job / 14_champion_deploy; env selected via 00_config.py (`ENV`), UC locations via config/environments.py, hyperparameters via config/recipes.py
 |-- resources/              # DAB resource YAML (jobs/, experiments/; NO serving/)
 |-- air/                    # AIR CLI workloads (terminal train + sweep lanes)
 |-- scripts/                # discover_air_runtime.py, warmup_endpoints.py, pin_model_cache.py, ...
@@ -194,7 +195,7 @@ dais26-mlops-for-dl-on-air/
 | Pyfunc serving load path | `serve/detector_model_script.py` + `platform/mlflow_io.py::_default_code_paths` | Detector logged via **models-from-code** (script, not pickled instance) with the package bundled via `code_paths`. Avoids `ModuleNotFoundError: transformers_modules` (dynamic `trust_remote_code` class) and `ModuleNotFoundError: dais26_dentex` at serving. Backbone loads strictly offline (`local_files_only`) from the bundled HF cache; `torch.compile` is disabled at serving. |
 | MLflow API drift | `platform/mlflow_io.py::_log_model_artifact_kwarg` | `name=` vs `artifact_path=` resolved once at import via `inspect.signature`. |
 | UC identifiers | `platform/uc.py::UCName`, `VolumePath` | Stop hand-rolling `f"{catalog}.{schema}.{name}"`; UC ident regex catches dotted-catalog typos. |
-| Notebook params | `notebooks/00_config.py` | Environment values (UC names, experiment, demo-time overrides) live there; hyperparameters come from `config/recipes.py`. Two deliberate job-parameter exceptions — `sweep_stage` (campaign_sweep) and `deploy_action` (confirm_challenger) — ride DAB `base_parameters` into notebook widgets so one job definition serves every stage/mode. |
+| Notebook params | `notebooks/00_config.py` | Selects a named environment (`ENV`) — UC locations resolve from `config/environments.py`; hyperparameters from `config/recipes.py`; demo-time knobs (TRAIN_EPOCHS etc.) live here. Two deliberate job-parameter exceptions — `sweep_stage` (campaign_sweep) and `deploy_action` (confirm_challenger) — ride DAB `base_parameters` into notebook widgets so one job definition serves every stage/mode. |
 
 Full rationale (race traces, alternatives considered, follow-ups) in
 [docs/RUNBOOK.md#engineering-rationale](docs/RUNBOOK.md#engineering-rationale).

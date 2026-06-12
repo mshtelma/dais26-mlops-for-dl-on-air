@@ -9,14 +9,12 @@ Reads `$HYPERPARAMETERS_PATH` (the air workload `parameters:` block), which
 must carry:
 
     stage: dinov3_s1            # a config.campaigns.CAMPAIGN_STAGES name
-    catalog: ...                # UC environment values
-    schema: ...
-    volume_path: ...
-    cache_dir: ...
-    experiment_name: ...        # the shared MLflow experiment (gates read it)
+    env: df1                    # a config.environments entry (catalog / schema /
+                                # volume_path / cache_dir / experiment_name)
 
 Optional keys: `model_name` (defaults to the stage backbone's registered
-name), `backbone_revision`, `strategy`, `seed`.
+name), `backbone_revision`, `strategy`, `seed`. Any env-derived location can
+also be set explicitly to override the named environment.
 
 The process group is initialized ONCE here and shared by every trial
 (`Trainer(cfg, manage_process_group=False)`); destroying/re-initializing NCCL
@@ -36,6 +34,7 @@ from typing import Any
 import yaml
 
 from dais26_dentex.config.campaigns import CAMPAIGN_STAGES
+from dais26_dentex.config.environments import load_environment
 from dais26_dentex.config.recipes import DETECTOR_NAMES_BY_BACKBONE
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.distributed import is_rank0, setup_distributed, teardown_distributed
@@ -57,6 +56,11 @@ def load_sweep_inputs(yaml_path: str) -> tuple[SweepSpec, dict[str, Any]]:
         raise ValueError(f"`stage` is required; known stages: {sorted(CAMPAIGN_STAGES)}")
     if stage_name not in CAMPAIGN_STAGES:
         raise ValueError(f"Unknown stage {stage_name!r}; known: {sorted(CAMPAIGN_STAGES)}")
+
+    env_name = raw.pop("env", None)
+    if env_name is not None:
+        # Environment locations are defaults; explicit YAML keys still win.
+        raw = {**load_environment(env_name).as_training_kwargs(), **raw}
 
     spec = SweepSpec.from_stage(
         stage_name,

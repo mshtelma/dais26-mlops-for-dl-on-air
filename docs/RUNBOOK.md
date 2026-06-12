@@ -874,13 +874,14 @@ dispatches to `Trainer.run()`. Common failures:
 | `MODEL_URI=` missing from rank 0 stdout | Training succeeded on non-rank-0 ranks, rank 0 crashed in `_save_and_register` | Inspect rank-0 logs (`air logs <run-id>`); MlflowReporter raises typed `AliasingError` instead of swallowing |
 | `ModuleNotFoundError: serverless_gpu` in cli flow | Don't need it — the cli is the torchrun path, not the `@distributed` path | Confirm you're running `air`/`torchrun`, not the notebook; `serverless_gpu` is only the notebook decorator |
 | Hyperparameters from yaml ignored | yaml top-level shape mismatch | The air workload yaml has `env_variables:` and `parameters:` as siblings — `parameters` lands at `$HYPERPARAMETERS_PATH` as JSON; `TrainerConfig.from_dict` validates fields and raises with the field-by-field error list |
-| Top-level `experiment_name` in the workload yaml differs from `EXPERIMENT_NAME` in `notebooks/00_config.py` | Intentional — the workload's own tracking vs. the training run's experiment | Keep the top-level name independent; `parameters.experiment_name` is what aligns the TRAINING run into the shared experiment |
+| Top-level `experiment_name` in the workload yaml differs from `EXPERIMENT_NAME` in `notebooks/00_config.py` | Intentional — the workload's own tracking vs. the training run's experiment | Keep the top-level name independent; the named `env:` (`config.environments`) is what aligns the TRAINING run into the shared experiment — the same env `00_config.py` selects, so the two lanes match |
 
 ### Hyperparameter sweep + backbone fine-tuning {#hpo-sweep}
 
 The `campaign_sweep` job (`notebooks/02b_hpo_sweep.py`) tunes the detector head and
-fine-tunes the C-RADIO / DINOv3 backbone. It is config-driven from the `SWEEP_*`
-block in `notebooks/00_config.py` and shares the `Trainer` core with the single-run
+fine-tunes the C-RADIO / DINOv3 backbone. It is config-driven from `CAMPAIGN_STAGES`
+in `config/campaigns.py` (selected by `SWEEP_STAGE` in `notebooks/00_config.py`) and
+shares the `Trainer` core with the single-run
 path, so anything below applies to both `train_detector` and `campaign_sweep`. It is
 the single sweep driver (parametrized by `sweep_stage`); the former `hpo_sweep` job
 has been folded into it, and a trailing `confirm_challenger` task asserts the

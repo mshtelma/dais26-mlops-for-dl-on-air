@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from dais26_dentex.config.environments import ENVIRONMENTS
+
 REPO = Path(__file__).resolve().parents[2]
 WORKLOAD = REPO / "air" / "workload_train_detector.yaml"
 REQS = REPO / "air" / "requirements.yaml"
@@ -65,6 +67,15 @@ def test_workload_parameters_use_internal_recipe_literal():
         "dinov3_vitl16",
         "dinov2_base",
     }
+
+
+def test_workload_parameters_name_a_known_environment():
+    """The workload names a config.environments entry instead of restating
+    catalog/schema/volume_path/cache_dir/experiment_name."""
+    params = _load(WORKLOAD)["parameters"]
+    assert params["env"] in ENVIRONMENTS
+    restated = {"catalog", "schema", "volume_path", "cache_dir", "experiment_name"} & set(params)
+    assert not restated, f"workload restates env-derived keys instead of using env: {restated}"
 
 
 def test_workload_environment_has_dependencies_pointer():
