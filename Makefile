@@ -1,4 +1,4 @@
-.PHONY: install lint test test-integration bundle-validate bundle-deploy-dev bundle-run-train bundle-run-embeddings bundle-run-drift warmup pin-cache build help
+.PHONY: install lint test test-integration bundle-validate bundle-deploy-dev bundle-run-train bundle-run-embeddings bundle-run-drift warmup pin-cache discover build help
 
 install:                           ## Install project in editable mode with dev deps
 	uv pip install -e ".[dev]"
@@ -18,17 +18,17 @@ build:                             ## Build the wheel via uv
 bundle-validate:                   ## Validate DAB configuration
 	databricks bundle validate -t dev
 
-bundle-deploy-dev:                 ## Deploy UC + jobs (NOT endpoints; endpoints SDK-driven post-train)
+bundle-deploy-dev:                 ## Deploy UC + jobs (NOT endpoints)
 	databricks bundle deploy -t dev
 
-bundle-run-train:                  ## Run training job: train + register + deploy endpoint via SDK
+bundle-run-train:                  ## Run DAB quickstart: train + register + confirm @challenger
 	databricks bundle run train_detector -t dev
 
 bundle-run-embeddings:             ## Run embedding precompute (champion job task, prod)
 	databricks bundle run deploy_champion_job -t prod --only precompute_embeddings
 
-bundle-run-drift:                  ## Run drift monitor on dev
-	databricks bundle run drift_monitor -t dev
+bundle-run-drift:                  ## Run drift monitor lane on prod
+	databricks bundle run drift_monitor -t prod
 
 warmup:                            ## Pre-warm serving endpoints
 	python scripts/warmup_endpoints.py

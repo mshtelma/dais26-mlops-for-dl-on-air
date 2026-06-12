@@ -94,7 +94,7 @@ in this repo prove it; both belong on slides.
 - No production accuracy monitoring (no prod labels). Retraining is **manual** today.
 
 **Distributed-training hardening** (`docs/ARCHITECTURE.md`, README)
-- `serverless_gpu.@distributed` (no clusters); one `Trainer` core shared by notebook `@distributed` and `torchrun`/`sgcli`; `TrainerConfig` single source of truth (no widgets).
+- `serverless_gpu.@distributed` (no clusters); one `Trainer` core shared by notebook `@distributed` and `torchrun`/`air`; `TrainerConfig` single source of truth (no widgets).
 - `rank0_first` (cold-cache HF download race), `safe_barrier` (dead-rank → `BarrierTimeoutError`, not a hang), `configure_hf_env` (`HF_HUB_ENABLE_HF_TRANSFER=0`, `HF_HUB_DISABLE_XET=1`; UC Volume FUSE rejects parallel chunked writes).
 - MLflow 3 LoggedModel metric linkage; dataset lineage via `mlflow.log_input`.
 

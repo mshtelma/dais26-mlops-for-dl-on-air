@@ -1,4 +1,4 @@
-"""Schema/structural tests for sgcli/*.yaml + cross-file consistency with pyproject.toml."""
+"""Schema/structural tests for air/*.yaml + cross-file consistency with pyproject.toml."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ from pathlib import Path
 
 import yaml
 
+from dais26_dentex.config.environments import ENVIRONMENTS
+
 REPO = Path(__file__).resolve().parents[2]
-WORKLOAD = REPO / "sgcli" / "workload_train_detector.yaml"
-REQS = REPO / "sgcli" / "requirements.yaml"
+WORKLOAD = REPO / "air" / "workload_train_detector.yaml"
+REQS = REPO / "air" / "requirements.yaml"
 PYPROJECT = REPO / "pyproject.toml"
 
 
@@ -31,15 +33,16 @@ def test_workload_required_keys():
 
 def test_workload_compute_h100_or_a10():
     d = _load(WORKLOAD)
-    assert d["compute"]["gpu_type"] in {"h100", "a10"}
-    assert isinstance(d["compute"]["gpus"], int) and d["compute"]["gpus"] >= 1
+    assert d["compute"]["accelerator_type"] in {"GPU_8xH100", "GPU_1xH100", "GPU_1xA10"}
+    assert isinstance(d["compute"]["num_accelerators"], int) and d["compute"]["num_accelerators"] >= 1
 
 
-def test_workload_code_source_repo_path_is_repo_root():
-    """repo_path is resolved relative to CWD (sgcli runs from the repo root), so it
-    must be `.` to snapshot the repo root."""
+def test_workload_code_source_root_path_is_repo_root():
+    """air resolves snapshot.root_path relative to the WORKLOAD YAML file (which
+    lives in air/), so it must be `..` to package the repo root — `.` would
+    snapshot only the air/ directory (observed via `air run --dry-run`)."""
     d = _load(WORKLOAD)
-    assert d["code_source"]["snapshot"]["repo_path"] == "."
+    assert d["code_source"]["snapshot"]["root_path"] == ".."
 
 
 def test_workload_command_does_not_use_no_deps():
@@ -55,15 +58,24 @@ def test_workload_command_uses_torchrun_module_entrypoint():
     assert "-m dais26_dentex.train.cli" in d["command"]
 
 
-def test_workload_parameters_use_internal_backbone_literal():
-    """The parameters block must use the internal Literal name, not the HF id —
-    train_detector's BackboneName Literal does not accept the HF id."""
+def test_workload_parameters_use_internal_recipe_literal():
+    """The parameters block names a recipe by the internal backbone literal,
+    not the HF id — `config.recipes.RECIPES` is keyed by the internal names."""
     d = _load(WORKLOAD)
-    assert d["parameters"]["backbone_name"] in {
+    assert d["parameters"]["recipe"] in {
         "cradio_v4_so400m",
         "dinov3_vitl16",
         "dinov2_base",
     }
+
+
+def test_workload_parameters_name_a_known_environment():
+    """The workload names a config.environments entry instead of restating
+    catalog/schema/volume_path/cache_dir/experiment_name."""
+    params = _load(WORKLOAD)["parameters"]
+    assert params["env"] in ENVIRONMENTS
+    restated = {"catalog", "schema", "volume_path", "cache_dir", "experiment_name"} & set(params)
+    assert not restated, f"workload restates env-derived keys instead of using env: {restated}"
 
 
 def test_workload_environment_has_dependencies_pointer():

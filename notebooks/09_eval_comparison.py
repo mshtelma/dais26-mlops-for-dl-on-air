@@ -37,7 +37,11 @@ import mlflow
 import pandas as pd
 import torch
 
-from dais26_dentex.eval.runner import build_name_to_category_id, score_model_on_split
+from dais26_dentex.eval.runner import (
+    build_name_to_category_id,
+    load_detector_by_alias,
+    score_model_on_split,
+)
 
 mlflow.set_registry_uri("databricks-uc")
 
@@ -74,26 +78,11 @@ print(f"Catalog/schema = {CATALOG}.{SCHEMA}")
 
 # COMMAND ----------
 # ---- Per-backbone, per-split evaluation ----
-
-
-def _load_detector(model_short: str):
-    """Load a registered detector pyfunc by alias preference, or (None, None)."""
-    full = f"{CATALOG}.{SCHEMA}.{model_short}"
-    for alias in ALIAS_PREFERENCE:
-        uri = f"models:/{full}@{alias}"
-        try:
-            model = mlflow.pyfunc.load_model(uri)
-            return model, uri
-        except Exception as e:
-            print(f"  {uri}: unavailable ({type(e).__name__})")
-    return None, None
-
-
 # results[split][backbone] = metrics dict from score_model_on_split.
 results: dict[str, dict[str, dict]] = {split: {} for split in EVAL_SPLITS}
 for backbone, cfg in COMPARE_BACKBONES.items():
     print(f"\n=== {backbone} ({cfg['model_short']}) ===")
-    model, uri = _load_detector(cfg["model_short"])
+    model, uri = load_detector_by_alias(f"{CATALOG}.{SCHEMA}.{cfg['model_short']}", ALIAS_PREFERENCE)
     if model is None:
         print(f"  no registered model for {backbone}; skipping")
         continue
@@ -116,7 +105,7 @@ for backbone, cfg in COMPARE_BACKBONES.items():
 if not any(results[split] for split in EVAL_SPLITS):
     raise RuntimeError(
         "No detectors could be loaded. Train + register at least one backbone "
-        "(02_train_detector_air.py / the sgcli workloads) first."
+        "(02_train_detector_air.py / the air workloads) first."
     )
 
 # COMMAND ----------

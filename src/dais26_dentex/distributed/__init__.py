@@ -8,6 +8,7 @@ from dais26_dentex.distributed.barrier_dance import rank0_first
 from dais26_dentex.distributed.primitives import (
     BarrierTimeoutError,
     barrier,
+    broadcast_object,
     global_rank,
     is_distributed,
     is_rank0,
@@ -24,6 +25,7 @@ from dais26_dentex.distributed.primitives import (
 __all__ = [
     "BarrierTimeoutError",
     "barrier",
+    "broadcast_object",
     "global_rank",
     "is_distributed",
     "is_rank0",

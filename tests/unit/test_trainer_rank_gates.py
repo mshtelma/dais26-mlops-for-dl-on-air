@@ -8,12 +8,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from dais26_dentex.train import train_detector as td_mod
+from dais26_dentex.config.trainer_config import TrainerConfig
+from dais26_dentex.train.trainer import Trainer
+
+
+def _run_trainer(**kwargs) -> str | None:
+    return Trainer(TrainerConfig(**kwargs)).run()
 
 
 @pytest.fixture
 def mock_heavy_deps(monkeypatch):
-    """Mock all expensive imports inside train_detector so the function body runs cheaply."""
+    """Mock all expensive imports inside the Trainer so run() executes cheaply."""
 
     # Backbone returns a tiny module + a fake BackboneInfo
     fake_bb = MagicMock()
@@ -69,7 +74,7 @@ def test_rank0_starts_mlflow_run(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.log_param", MagicMock())
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
-    run_id = td_mod.train_detector(
+    run_id = _run_trainer(
         catalog="c",
         schema="s",
         volume_path=None,  # skip dataloaders for unit test
@@ -83,7 +88,7 @@ def test_rank0_starts_mlflow_run(mock_heavy_deps, monkeypatch):
 
 
 def _stub_distributed(monkeypatch):
-    """Stub out torch.distributed + DDP so train_detector's distributed branch
+    """Stub out torch.distributed + DDP so the Trainer's distributed branch
     doesn't need a real process group."""
     import torch.distributed as dist
 
@@ -119,7 +124,7 @@ def test_non_rank0_does_not_start_mlflow_run(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.log_param", MagicMock())
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
-    run_id = td_mod.train_detector(
+    run_id = _run_trainer(
         catalog="c",
         schema="s",
         volume_path=None,
@@ -148,7 +153,7 @@ def test_set_registry_uri_only_on_rank0(mock_heavy_deps, monkeypatch):
     monkeypatch.setattr("mlflow.log_param", MagicMock())
     monkeypatch.setattr("mlflow.pyfunc.log_model", MagicMock())
 
-    td_mod.train_detector(
+    _run_trainer(
         catalog="c",
         schema="s",
         volume_path=None,

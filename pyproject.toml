@@ -48,6 +48,7 @@ air = [
 
 [project.scripts]
 dais26-train = "dais26_dentex.train.cli:main"
+dais26-sweep = "dais26_dentex.train.sweep_cli:main"
 
 [build-system]
 requires = ["hatchling"]

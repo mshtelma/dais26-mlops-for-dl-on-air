@@ -6,9 +6,6 @@ on:
     branches:
       - main
 
-permissions:
-  contents: read
-
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -54,8 +51,3 @@ jobs:
           python3 -m venv /tmp/wheel_test
           /tmp/wheel_test/bin/pip install dist/*.whl
           /tmp/wheel_test/bin/python -c "import dais26_dentex; print(dais26_dentex.__version__)"
-
-  # NOTE: `databricks bundle validate` is intentionally NOT run in CI. The target
-  # workspace enforces an IP access list that blocks GitHub-hosted runner IPs
-  # (403), and validate must contact the workspace. Validate locally before
-  # pushing: `databricks bundle validate -t dev`.

@@ -1,5 +1,11 @@
 # HPO log — DENTEX detector
 
+> Stage definitions now live as typed package data in
+> `dais26_dentex.config.campaigns.CAMPAIGN_STAGES` (validated by unit tests);
+> the best-known final recipes are `dais26_dentex.config.recipes.RECIPES`.
+> Launch any stage via the DAB `campaign_sweep` job or
+> `air/workload_sweep.yaml` — both run `train.sweep_runner.SweepRunner`.
+
 Running log of the detector's hyperparameter-optimization journey on the DENTEX
 diagnosis task (4 classes: Caries, Deep Caries, Periapical Lesion, Impacted; 705/50/250
 train/val/test). Metric is COCO `val/mAP_50` on the 50-image val split, as logged by the
@@ -135,7 +141,7 @@ P3–P6 (`src/dais26_dentex/models/detection_head.py`). So P3 (stride 8) gets 12
 P6 (stride 64) gets 16px anchors — most anchors are geometrically useless, the IoU matcher's
 positive fraction collapses, focal loss is starved. Flagged as the MAJOR issue in
 `src/dais26_dentex/models/arch_probe.py::KNOWN_ISSUES` and quantified live by
-`notebooks/02a_arch_probe.py` (`all_scales_every_level=True`, tiny `positive_fraction`).
+`notebooks/diagnostics/02a_arch_probe.py` (`all_scales_every_level=True`, tiny `positive_fraction`).
 
 External cross-reference (DENTEX papers, arXiv:2305.19112; RetinaNet/Focal-Loss reviews):
 RetinaNet baseline on DENTEX diagnosis ≈ **0.604 AP50**; top challenge teams ~0.68. RetinaNet
@@ -175,7 +181,7 @@ fix is a safety net here (no large-gt/small-anchor extreme in the first 4 images
 rather than a mover of this metric.
 
 Reproduce: pull `val.json` from the UC Volume and run the probe locally (CPU,
-fake backbone, 64x64 grid), or run `notebooks/02a_arch_probe.py` on a GPU node
+fake backbone, 64x64 grid), or run `notebooks/diagnostics/02a_arch_probe.py` on a GPU node
 for the full real-backbone pass.
 
 ## Fixes (shipped — drove 0.335 → 0.522)
@@ -224,8 +230,9 @@ may move, so the winner is retrained at **both 50 and `TRAIN_EPOCHS_LONG=100` ep
 the better by `val/best_mAP_50`. This is safe against overfitting: the `Trainer` already tracks the
 best checkpoint, so a 100-epoch run that peaks earlier still reports (and registers) its peak rather
 than the over-trained final epoch. Only one extra full-length run is added — the cheap trials are
-unchanged. (Wired via `TRAIN_EPOCHS_LONG` in `notebooks/00_config.py` and a second winner retrain in
-`notebooks/02b_hpo_sweep.py`; applies to the next sweep, not the in-flight run.)
+unchanged. (Historical wiring: `TRAIN_EPOCHS_LONG` in the then-monolithic `00_config.py`; today the
+schedule arm is `schedule_epochs` on the stage in `config/campaigns.py`, executed by
+`train/sweep_runner.py`. Applied to the next sweep, not the in-flight run.)
 
 **Acceptance:** beat **0.335** ✅ → **≥ 0.45** MUST-SHIP ✅ (**0.519** re-eval, [BENCHMARKS.md](BENCHMARKS.md))
 → **~0.60** stretch (RetinaNet-parity) — *remaining headroom ~0.08*. Per-class confirmed via
@@ -431,8 +438,9 @@ are byte-identical:
   optimizer step (the OneCycle scheduler now steps once per *optimizer* step).
   Lets fp32 DINOv3 keep a large effective batch at 1280px with `batch_size=2`.
 
-Campaign stages live in `CAMPAIGN_STAGES` (`notebooks/00_config.py`); the 02b
-sweep harness honors a `sweep_stage` widget / job parameter. New launchable jobs:
+Campaign stages live in `CAMPAIGN_STAGES` (`config/campaigns.py`, selected by
+`SWEEP_STAGE` in `notebooks/00_config.py`); the 02b sweep harness honors a
+`sweep_stage` widget / job parameter. New launchable jobs:
 `resources/jobs/campaign_sweep.yml` (parametrized by `sweep_stage`,
 `max_concurrent_runs: 2` so two stages can share the GPU pool) and
 `resources/jobs/eval_threshold_grid.yml` (the free grid, single A10,

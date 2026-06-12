@@ -112,7 +112,7 @@ def archive_orphaned_inference_table(
     try:
         if not spark.catalog.tableExists(payload):
             return None
-    except Exception as e:  # noqa: BLE001 — a lookup failure just means "nothing to archive"
+    except Exception as e:
         logger.warning("Could not check for orphaned inference table %s: %s", payload, e)
         return None
     ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
@@ -410,7 +410,7 @@ def deploy_and_smoke_test(
             error=err,
         )
 
-    # 8. Promote @candidate -> @champion (atomic alias overwrite via MLflow)
+    # 8. Promote @challenger -> @champion (atomic alias overwrite via MLflow)
     promoted = False
     if promote_on_success:
         try:

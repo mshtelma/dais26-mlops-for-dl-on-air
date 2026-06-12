@@ -197,7 +197,7 @@ Does **not** deploy:
 ```
 
 The training core (`Trainer`) is identical across launch paths — `notebook @distributed`
-or `sgcli` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
+or `air` / `torchrun`. The CLI entry (`train.cli:main`) reads `$HYPERPARAMETERS_PATH`
 or `--config`, builds the `TrainerConfig`, and dispatches to the same `Trainer.run()`.
 
 ### Phase 2b (optional): `databricks bundle run campaign_sweep -t dev -- --params sweep_stage=<stage>`
@@ -250,7 +250,7 @@ only for legacy versions whose LoggedModel carries no linked metric.
 > a future client ever sets it). The deployment job's eval task, `notebooks/10`,
 > links its `val/*` metrics to the version's LoggedModel the same way.
 
-What the sweep explores (`SWEEP_SEARCH_SPACE` in `notebooks/00_config.py`):
+What the sweep explores (per-stage `search_space` in `dais26_dentex.config.campaigns.CAMPAIGN_STAGES`):
 
 | Knob | Why it's swept |
 |------|----------------|
@@ -267,7 +267,7 @@ metric, and whether to register the winner are all config-driven via the `SWEEP_
 are unit-tested in isolation. The sweep job carries a **48-hour** timeout (`timeout_seconds:
 172800`) and runs on `GPU_8xH100`.
 
-> **Architecture audit first.** Before sweeping, run `notebooks/02a_arch_probe.py`. It builds a
+> **Architecture audit first.** Before sweeping, run `notebooks/diagnostics/02a_arch_probe.py`. It builds a
 > live detector and runs `models/arch_probe.probe_detection_model` to report anchor counts,
 > positive-anchor fraction per FPN level, delta-clamp overflow, and NMS mode, alongside the
 > static `KNOWN_ISSUES` register (e.g. every anchor scale emitted at every FPN level, which
@@ -662,7 +662,7 @@ src/dais26_dentex/
 │   ├── manifest.py           (Manifest v2 dataclass: BackboneSpec + DetectorSpec
 │   │                          → single manifest.json, version-first key order)
 │   └── trainer_config.py     (TrainerConfig frozen dataclass; from_yaml/from_dict
-│                              feeds notebook @distributed AND sgcli/torchrun)
+│                              feeds notebook @distributed AND air/torchrun)
 │
 ├── data/
 │   ├── dataset.py            (PyTorch Dataset over COCO JSON + UC Volume images)
@@ -693,7 +693,7 @@ src/dais26_dentex/
 │   │                          no_grad on whether the encoder is frozen)
 │   ├── targets.py            (anchor generator + target encoding; FPNLevel)
 │   ├── arch_probe.py         (read-only consistency probe + KNOWN_ISSUES register;
-│   │                          driven by notebooks/02a_arch_probe.py)
+│   │                          driven by notebooks/diagnostics/02a_arch_probe.py)
 │   └── peft.py               (LoRA on backbone QKV+proj; unfreeze_last_blocks for
 │                              backbone_mode=partial)
 │
@@ -734,7 +734,7 @@ src/dais26_dentex/
     ├── sweep.py              (pure HPO helpers: iter_trials grid/random +
     │                          select_best; no torch/mlflow — unit-tested)
     ├── losses.py             (focal + smooth-L1)
-    └── cli.py                (sgcli/torchrun entrypoint — reads
+    └── cli.py                (air/torchrun entrypoint — reads
                                $HYPERPARAMETERS_PATH or --config; builds
                                TrainerConfig and runs Trainer(cfg).run() so every
                                YAML knob is honored; prints MODEL_URI=<run_id>)
@@ -745,7 +745,8 @@ src/dais26_dentex/
 | Anchor | Module | Why |
 |---|---|---|
 | Manifest v2 | `config/manifest.py` | One `manifest.json` (version first → `head -1` triages a model) replaces v1's three sidecar JSONs. `load_manifest` raises `IncompatibleArtifactError` on v1 with a one-shot migration hint. |
-| TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and sgcli's torchrun. |
+| TrainerConfig | `config/trainer_config.py` | Frozen dataclass; `from_dict` / `from_yaml` / `validate`; same instance feeds notebook `@distributed` and the air lane's torchrun. |
+| Named config (`recipe` / `env` / stage) | `config/recipes.py`, `config/environments.py`, `config/campaigns.py` | Both lanes select hyperparameters, UC locations, and sweep stages **by name** (in-wheel, so air pods and notebooks resolve the identical dicts) — the DAB↔air harmonization. A target or recipe switch is one token (`env: df1`, `recipe: cradio_v4_so400m`), never a re-statement of values; a non-git-ignored `environments.local.yaml` overlay rides air's snapshot for per-user targets. |
 | `safe_barrier` | `distributed/primitives.py` | Bounded `wait()` over `dist.barrier(async_op=True)` — surfaces `BarrierTimeoutError` instead of hanging on NCCL when a peer rank crashed. |
 | `rank0_first` | `distributed/barrier_dance.py` | Non-rank-0 hits its barrier first, rank 0 does the work and then hits its barrier; trailing symmetric barrier. Pattern fixes the cold-cache HF download race. |
 | `configure_hf_env` | `platform/hf_env.py` | One canonical site for `HF_HUB_ENABLE_HF_TRANSFER=0` + `HF_HUB_DISABLE_XET=1` — UC Volume FUSE rejects parallel chunked writes. |
@@ -758,9 +759,11 @@ src/dais26_dentex/
 
 ## Unity Catalog resource map
 
-Names are config-driven from `notebooks/00_config.py` (`CATALOG`, `SCHEMA`, `TABLE_PREFIX`, and the
-backbone-keyed model/endpoint names). Current defaults: catalog `mlops_pj`, schema `dais26_vfm`,
-table/index prefix `dais26_dentex_`, backbone `cradio_v4_so400m`. The table below uses the legacy
+Names are config-driven: UC locations from the named environment in `config/environments.py`
+(selected by `ENV` in `notebooks/00_config.py`), with `TABLE_PREFIX` and the backbone-keyed
+model/endpoint names from `00_config.py`. The default `ENV = "df1"` resolves to catalog `main`,
+schema `mshtelma`; `ENV = "prod"` → `mlops_pj` / `dais26_vfm`. Table/index prefix `dais26_dentex_`,
+backbone `cradio_v4_so400m`. The table below uses the legacy
 `ml`/`cradio_detector` names for illustration.
 
 | Resource type | Full name | Notes |

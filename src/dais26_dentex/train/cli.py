@@ -1,20 +1,20 @@
-"""sgcli / torchrun entrypoint for `train_detector`.
+"""air / torchrun entrypoint for `train_detector`.
 
-Reads `$HYPERPARAMETERS_PATH` (a YAML file that sgcli writes from the workload's
+Reads `$HYPERPARAMETERS_PATH` (a YAML file the AIR CLI writes from the workload's
 `parameters:` block), builds a `TrainerConfig`, and runs `Trainer(cfg).run()`
 directly.
 
-We deliberately do NOT round-trip through `train_detector(**cfg.to_kwargs_for_train_detector())`:
-that helper forwards only the legacy kwarg subset, which silently dropped the
-loss/optimizer/anchor/backbone knobs (`weight_decay`, `onecycle_pct_start`,
-`grad_clip_norm`, `focal_*`, `box_loss_weight`, `anchor_scales`, `aspect_ratios`,
-`backbone_mode`, `backbone_lr`). Constructing the `Trainer` from the fully-typed
-`cfg` honors every field the YAML sets.
+The YAML may name an `env:` (a `config.environments` entry — catalog / schema /
+volume_path / cache_dir / experiment_name) and a `recipe:` (a backbone literal
+from `config.recipes.RECIPES` — the best-known hyperparameters). Each expands
+into defaults that the remaining YAML keys override. This is what keeps the air
+workload `parameters:` block down to two names plus a deliberate override or
+two, instead of a hand-maintained mirror of the notebook constants; both launch
+lanes resolve the same env + recipe.
 
-The old hand-rolled `_INT_KEYS / _FLOAT_KEYS / _BOOL_KEYS / filter_to_known_kwargs /
-_coerce` lives on the dataclass now (see `config.trainer_config.TrainerConfig.from_dict`),
-so adding a new knob is a one-line change to `TrainerConfig` instead of editing
-two coercion lists plus the YAML.
+Coercion of stringly-typed YAML values lives on the dataclass
+(`TrainerConfig.from_dict`), so adding a new knob is a one-line change to
+`TrainerConfig`.
 
 Flags:
     --config <path>   Override `$HYPERPARAMETERS_PATH`. Useful for local dry-runs.
@@ -29,11 +29,53 @@ import logging
 import os
 import sys
 
+import yaml
+
+from dais26_dentex.config.environments import load_environment
+from dais26_dentex.config.recipes import RECIPES, build_trainer_config
 from dais26_dentex.config.trainer_config import TrainerConfig
 from dais26_dentex.distributed import is_rank0
 from dais26_dentex.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
+
+
+def load_config(yaml_path: str) -> TrainerConfig:
+    """Build a TrainerConfig from a (air-written) parameters YAML.
+
+    Two optional resolution keys, each mirroring the notebook lane: `env:`
+    names a `config.environments` entry (catalog / schema / volume_path /
+    cache_dir / experiment_name), and `recipe:` names a `config.recipes` entry
+    (hyperparameters). Each expands into defaults that the YAML's remaining
+    keys override (explicit always wins). Without either, the YAML must carry a
+    full config (legacy behavior).
+    """
+    with open(yaml_path) as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"YAML at {yaml_path} did not produce a mapping; got {type(raw).__name__}")
+    # `air` writes the FULL workload spec to $HYPERPARAMETERS_PATH with the user
+    # params nested under `parameters:`; a local --config / test file is already
+    # the flat params mapping. Accept both.
+    if isinstance(raw.get("parameters"), dict):
+        raw = raw["parameters"]
+    recipe = raw.pop("recipe", None)
+    env_name = raw.pop("env", None)
+    if env_name is not None:
+        # Environment locations are defaults; explicit YAML keys still win.
+        raw = {**load_environment(env_name).as_training_kwargs(), **raw}
+    if recipe is None:
+        return TrainerConfig.from_dict(raw)
+    if recipe not in RECIPES:
+        raise ValueError(f"Unknown recipe {recipe!r}; known: {sorted(RECIPES)}")
+    try:
+        catalog = raw.pop("catalog")
+        schema = raw.pop("schema")
+    except KeyError as e:
+        raise ValueError(
+            f"recipe-based config requires {e.args[0]!r} (set it directly or via env:)"
+        ) from e
+    return build_trainer_config(recipe, catalog=catalog, schema=schema, **raw)
 
 
 def _resolve_yaml_path(args_config: str | None) -> str | None:
@@ -63,8 +105,26 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Config file does not exist: %s", yaml_path)
         return 2
 
-    cfg = TrainerConfig.from_yaml(yaml_path)
+    cfg = load_config(yaml_path)
     cfg.validate()
+    if cfg.experiment_name is None:
+        logger.warning(
+            "experiment_name is not set: the training run will land in the pod's "
+            "ambient/default MLflow experiment (or the AIR workload's own run via "
+            "MLFLOW_RUN_ID), invisible to the sweep and deployment-job "
+            "best-in-experiment gates. Set parameters.experiment_name in the air "
+            "workload (distinct from the workload's own top-level experiment_name)."
+        )
+    elif os.environ.pop("MLFLOW_RUN_ID", None):
+        # The AIR CLI exports MLFLOW_RUN_ID for the workload's OWN MLflow run;
+        # left in place, mlflow.start_run() inside the Trainer would attach to
+        # that run instead of creating a fresh one in the configured
+        # experiment. Clear it so the training run lands where the gates look.
+        logger.info(
+            "Cleared ambient MLFLOW_RUN_ID (AIR workload run); training run will "
+            "be created in %s.",
+            cfg.experiment_name,
+        )
 
     if args.dry_run:
         for k, v in cfg.to_dict().items():

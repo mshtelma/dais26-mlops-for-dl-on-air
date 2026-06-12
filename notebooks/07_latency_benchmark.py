@@ -5,6 +5,12 @@
 # MAGIC the pivot ladder (if p99 > 150ms, recommend GPU_MEDIUM).
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------

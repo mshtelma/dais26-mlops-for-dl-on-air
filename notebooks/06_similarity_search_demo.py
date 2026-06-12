@@ -4,6 +4,12 @@
 # MAGIC Query the embeddings index with a held-out val image, display top-10 similar images.
 
 # COMMAND ----------
+# MAGIC %pip install --quiet ..
+
+# COMMAND ----------
+dbutils.library.restartPython()
+
+# COMMAND ----------
 # MAGIC %run ./00_config
 
 # COMMAND ----------

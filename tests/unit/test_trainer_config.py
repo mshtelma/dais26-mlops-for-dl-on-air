@@ -52,7 +52,7 @@ def test_with_overrides_returns_new_instance() -> None:
 
 
 def test_from_dict_coerces_strings_to_typed_values() -> None:
-    """sgcli SHOULD pass typed YAML values, but defensively coerce stringly-
+    """the air CLI SHOULD pass typed YAML values, but defensively coerce stringly-
     typed inputs too — that's what the old `_coerce` function did and tests
     here pin the behavior so it doesn't regress."""
     cfg = TrainerConfig.from_dict(
@@ -330,41 +330,6 @@ def test_to_mlflow_params_includes_every_field() -> None:
     params = cfg.to_mlflow_params()
     field_names = {f.name for f in dataclasses.fields(cfg)}
     assert set(params.keys()) == field_names
-
-
-# --- to_kwargs_for_train_detector ---------------------------------------
-
-
-def test_to_kwargs_for_train_detector_subset_matches_legacy_signature() -> None:
-    """The kwargs dict must be exactly the legacy `train_detector` signature
-    minus self. If `train_detector` adds a kwarg, this test breaks until we
-    extend `to_kwargs_for_train_detector` (intentional — forces visibility)."""
-    import inspect
-
-    from dais26_dentex.train.train_detector import train_detector
-
-    legacy_keys = set(inspect.signature(train_detector).parameters.keys())
-
-    cfg = TrainerConfig(catalog="c", schema="s")
-    kwargs = cfg.to_kwargs_for_train_detector()
-    assert set(kwargs.keys()) == legacy_keys, (
-        f"Drift detected:\n"
-        f"  Missing from cfg: {legacy_keys - set(kwargs.keys())}\n"
-        f"  Extra in cfg:     {set(kwargs.keys()) - legacy_keys}"
-    )
-
-
-def test_to_kwargs_round_trip_through_train_detector_signature() -> None:
-    """The kwargs dict can actually be unpacked into `train_detector` (we
-    don't call it — that needs the full env — but inspect.bind validates
-    the shape)."""
-    import inspect
-
-    from dais26_dentex.train.train_detector import train_detector
-
-    cfg = TrainerConfig(catalog="c", schema="s")
-    sig = inspect.signature(train_detector)
-    sig.bind(**cfg.to_kwargs_for_train_detector())  # raises TypeError on mismatch
 
 
 # --- to_dict ------------------------------------------------------------

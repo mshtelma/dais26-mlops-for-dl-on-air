@@ -1,10 +1,11 @@
 """`Trainer` class — owns the train + validate + checkpoint + register loop.
 
-Replaces the 360-line procedural body of `train_detector(...)`. The thin
-orchestrator at `train_detector.py` now constructs a `TrainerConfig` and
-delegates here.
+The single training core behind every launch surface: the notebook
+`@distributed` closure (02 / 02b), the air/torchrun CLIs (`train.cli`,
+`train.sweep_cli`), and tests all construct a `TrainerConfig` and call
+`Trainer(cfg).run()`.
 
-Key correctness fixes vs. the legacy:
+Key correctness fixes vs. the legacy procedural implementation:
   * `_build_targets` smoke stub → IoU-based matcher (`models.targets`)
   * cls-only loss → `detection_loss` (focal cls + smooth-L1 box)
   * hardcoded `num_classes=4` → `resolve_num_classes(cfg)`
@@ -75,12 +76,6 @@ from dais26_dentex.train.losses import detection_loss
 logger = logging.getLogger(__name__)
 
 
-# Re-exported for callers that import these symbols from this module.
-# Note: the canonical `__all__` is at module bottom — this earlier one is
-# a documentation breadcrumb only and is overwritten before import-time
-# settles.
-
-
 class Trainer:
     """Owns one `train_detector` invocation end-to-end.
 
@@ -89,9 +84,17 @@ class Trainer:
     instantiate without a full training environment.
     """
 
-    def __init__(self, cfg: TrainerConfig) -> None:
+    def __init__(self, cfg: TrainerConfig, *, manage_process_group: bool = True) -> None:
         cfg.validate()
         self.cfg = cfg
+        # Launcher plumbing, deliberately NOT a TrainerConfig field (it would
+        # leak into to_mlflow_params and the reproducibility surface). True =
+        # this Trainer owns the PG lifecycle (single-run launches: notebook
+        # @distributed dispatch, one-shot torchrun). False = an outer driver
+        # (the in-job torchrun sweep) init'ed the PG once and reuses it across
+        # sequential Trainer runs — destroying it between trials would force a
+        # risky NCCL re-init per trial.
+        self._manage_pg = manage_process_group
         self.device: torch.device = setup_distributed()
         seed_per_rank(cfg.base_seed)
         logger.info("Trainer device=%s world_size=%d", self.device, world_size())
@@ -486,7 +489,7 @@ class Trainer:
         )
 
     def _save_and_register(self, info: Any) -> None:
-        """Rank-0 only: write v2 artifacts, log pyfunc, set @candidate alias."""
+        """Rank-0 only: write v2 artifacts, log pyfunc, set @challenger alias."""
         cfg = self.cfg
         if self._best_state_dict is None:
             logger.warning("No best state captured; skipping save.")
@@ -572,7 +575,7 @@ class Trainer:
             logger.info("Logged %d best-epoch metric(s) to LoggedModel %s", len(metrics), model_id)
         except TypeError:
             logger.info("mlflow.log_metrics has no model_id kwarg; metrics live on the run only.")
-        except Exception as e:  # noqa: BLE001 — lineage nicety, never fail a trained run
+        except Exception as e:
             logger.warning("Could not log metrics to LoggedModel %s: %s", model_id, e)
 
     # ------------------------------------------------------------------
@@ -681,7 +684,8 @@ class Trainer:
                         }
                     self._save_and_register(info)
         finally:
-            teardown_distributed()
+            if self._manage_pg:
+                teardown_distributed()
         return self.run_id
 
     def _epoch_loop(
