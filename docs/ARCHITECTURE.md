@@ -1,5 +1,11 @@
 # Architecture
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    System design + engineering-rationale reference. New here? Start with
+    [Overview & mental model](getting-started/overview.md). Operational procedures are in
+    [Operations & runbook](RUNBOOK.md); the tuning history is the [HPO campaign log](HPO.md);
+    the step-by-step pipeline is the [MLOps Lifecycle](lifecycle/overview.md).
+
 ## System overview
 
 ```
@@ -126,7 +132,7 @@ All dimension-dependent code parameterizes on `backbone_info.summary_dim` and
 | `summary` (CLS token) | `(B, 768)` | `output[:, 0, :]` |
 | `spatial_features` | `(B, T, 768)` | `output[:, 1:, :]` |
 
-The fallback requires rebuilding all dimension-dependent artifacts. See [RUNBOOK.md](RUNBOOK.md#dinov2-fallback).
+The fallback requires rebuilding all dimension-dependent artifacts. See [DINOv2 emergency fallback](scenarios/dinov2-fallback.md).
 
 ---
 
@@ -410,7 +416,7 @@ w.serving_endpoints.create_and_wait(
 
 ---
 
-## Deployment job + cross-schema promotion (MLflow 3)
+## Deployment job + cross-schema promotion (MLflow 3) {#deployment-jobs-and-cross-schema-promotion}
 
 The flows above describe the original single-schema, alias-flip promotion driven by the
 `deploy_endpoint` task. That path is retained as **break-glass / manual redeploy**. The

@@ -1,5 +1,10 @@
 # HPO log — DENTEX detector
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    The research record of the push-to-0.60 tuning campaign (every run, every mAP). To *run* a
+    sweep see [HPO sweep](lifecycle/hpo-sweep.md); for the resulting best-known recipes see
+    [Configuration reference → recipes](reference/configuration.md#recipes).
+
 > Stage definitions now live as typed package data in
 > `dais26_dentex.config.campaigns.CAMPAIGN_STAGES` (validated by unit tests);
 > the best-known final recipes are `dais26_dentex.config.recipes.RECIPES`.
@@ -236,7 +241,7 @@ schedule arm is `schedule_epochs` on the stage in `config/campaigns.py`, execute
 
 **Acceptance:** beat **0.335** ✅ → **≥ 0.45** MUST-SHIP ✅ (**0.519** re-eval, [BENCHMARKS.md](BENCHMARKS.md))
 → **~0.60** stretch (RetinaNet-parity) — *remaining headroom ~0.08*. Per-class confirmed via
-[09_eval_comparison.py](../notebooks/09_eval_comparison.py) (see "Serving re-eval" below): all four
+[09_eval_comparison.py](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/blob/main/notebooks/09_eval_comparison.py) (see "Serving re-eval" below): all four
 classes lifted, but **`Caries AP@50 = 0.205` still misses the `≥ 0.30` sub-bar** — the open next lever.
 
 ## Serving re-eval + a preprocessing bug it caught (`09_eval_comparison.py`)
@@ -335,7 +340,7 @@ moving off P3 onto P4); Phase 2 dispatches the two `@distributed` 8xH100 arms an
 reads back `val/best_mAP_50`; Phase 3 prints the verdict. The decision rule:
 treatment must beat the baseline arm and clear the must-ship bar (`mAP@50 ≥ 0.45`,
 `Caries AP@50 ≥ 0.30`); register the treatment arm and run
-[09_eval_comparison.py](../notebooks/09_eval_comparison.py) for the apples-to-apples
+[09_eval_comparison.py](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/blob/main/notebooks/09_eval_comparison.py) for the apples-to-apples
 per-class re-eval through the serving pyfunc.
 
 Phase-1 probe rows below are the **real-DINOv3-encoder** numbers (1024px, 64×64
@@ -408,7 +413,7 @@ for r in runs:
     print(r.info.run_name, r.data.metrics["val/best_mAP_50"], r.data.params.get("backbone_mode"))
 ```
 
-## Push to 0.60 — two sequential single-model campaigns
+## Push to 0.60 — two sequential single-model campaigns {#push-to-060--two-sequential-single-model-campaigns}
 
 Both backbones sit at ~0.52 `val/best_mAP_50` after the per-level anchor fix. The
 goal is **0.60 on each model individually (no ensemble)** — a ~0.08 lift on 705
