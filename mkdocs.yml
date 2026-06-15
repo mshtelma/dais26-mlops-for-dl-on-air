@@ -1,0 +1,145 @@
+site_name: DAIS26 — MLOps for DL on AI Runtime
+site_description: >-
+  One frozen vision backbone, three jobs (detection, embeddings, drift) — the full
+  Databricks MLOps lifecycle across two harmonized launch lanes (DAB bundle + air CLI).
+site_url: https://mshtelma.github.io/dais26-mlops-for-dl-on-air/
+site_author: Michael Shtelma
+
+repo_name: mshtelma/dais26-mlops-for-dl-on-air
+repo_url: https://github.com/mshtelma/dais26-mlops-for-dl-on-air
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+# Keep the planning spec, the committed deck, and housekeeping files out of the
+# rendered site. Everything else under docs/ must be in `nav` (or `not_in_nav`)
+# so `mkdocs build --strict` stays green.
+exclude_docs: |
+  superpowers/
+  *.pptx
+  .gitkeep
+  README.md
+
+# Make `mkdocs build --strict` a real link/anchor gate: broken internal links and
+# broken #anchors both become build failures.
+validation:
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.tracking
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.keys
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Get Started:
+      - Overview & mental model: getting-started/overview.md
+      - Prerequisites: getting-started/prerequisites.md
+      - Install & authenticate: getting-started/installation.md
+      - Quickstart — DAB lane: getting-started/quickstart-dab.md
+      - Quickstart — air CLI lane: getting-started/quickstart-air.md
+  - The Two Lanes:
+      - Lane parity (why they can't drift): lanes/overview.md
+      - DAB (Asset Bundle) lane: lanes/dab.md
+      - air CLI lane: lanes/air.md
+      - Named configuration: lanes/configuration.md
+  - MLOps Lifecycle:
+      - Lifecycle overview: lifecycle/overview.md
+      - 1 · Setup & data: lifecycle/setup-and-data.md
+      - 2 · Train & register @challenger: lifecycle/train-and-register.md
+      - 3 · HPO sweep (optional): lifecycle/hpo-sweep.md
+      - 4 · Evaluate → approve → promote: lifecycle/evaluate-approve-promote.md
+      - 5 · Serve & AI Gateway: lifecycle/serve.md
+      - 6 · Embeddings → Vector Search → drift: lifecycle/embeddings-vector-search-drift.md
+      - 7 · Rollback: lifecycle/rollback.md
+  - Scenarios:
+      - Switch backbone: scenarios/switch-backbone.md
+      - DINOv2 emergency fallback: scenarios/dinov2-fallback.md
+      - Production deployment: scenarios/production-deploy.md
+      - Serving smoke test (curl): scenarios/serving-smoke-test.md
+      - Vector Search query: scenarios/vector-search-query.md
+      - Drift — demo vs scheduled: scenarios/drift-monitoring.md
+      - CI/CD (GitHub Actions): scenarios/cicd.md
+      - Per-user environment overrides: scenarios/env-overrides.md
+  - Architecture: ARCHITECTURE.md
+  - Reference:
+      - Notebooks catalog: reference/notebooks.md
+      - Jobs catalog: reference/jobs.md
+      - Scripts catalog: reference/scripts.md
+      - Configuration reference: reference/configuration.md
+      - Unity Catalog resource map: reference/uc-resources.md
+      - Troubleshooting: reference/troubleshooting.md
+      - CLI cheat-sheet: reference/cli.md
+  - Project:
+      - HPO campaign log: HPO.md
+      - Benchmarks: BENCHMARKS.md
+      - Operations & runbook: RUNBOOK.md
+      - The talk (45-min outline): TALK.md
+      - Deck brief: DECK_BRIEF_DL_MLOPS.md

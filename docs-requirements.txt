@@ -1,0 +1,7 @@
+# Documentation site build dependencies (MkDocs + Material).
+# Material bundles the PyMdown extensions and the Mermaid.js integration the
+# site uses, so this single dependency is enough to `mkdocs build`/`serve`.
+#   pip install -r docs-requirements.txt
+#   mkdocs serve            # local preview at http://127.0.0.1:8000
+#   mkdocs build --strict   # CI gate: fails on any broken internal link/anchor
+mkdocs-material>=9.5,<10

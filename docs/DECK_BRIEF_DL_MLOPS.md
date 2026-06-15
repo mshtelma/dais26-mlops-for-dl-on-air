@@ -1,5 +1,10 @@
 # Deck brief: Deep Learning Breaks MLOps
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    A self-contained slide-by-slide brief for a deck-building agent. The delivery outline is
+    [The talk](TALK.md); every claim here is grounded in [Architecture](ARCHITECTURE.md) and the
+    [HPO campaign log](HPO.md).
+
 > **Purpose of this file.** A self-contained slide-by-slide brief a deck-building agent (or a human)
 > can turn into a presentation without re-reading the codebase. Every claim here is grounded in this
 > repo (`docs/ARCHITECTURE.md`, `docs/HPO.md`, `docs/BENCHMARKS.md`, `databricks.yml`) and in the

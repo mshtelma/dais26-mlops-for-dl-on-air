@@ -1,5 +1,11 @@
 # Runbook
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    Operational procedures + the engineering-rationale deep-dives (anchored so the `docs/RUNBOOK.md#…`
+    links in source-code comments keep resolving). For the step-by-step pipeline see the
+    [MLOps Lifecycle](lifecycle/overview.md); for system design see [Architecture](ARCHITECTURE.md);
+    for the consolidated symptom table see [Troubleshooting](reference/troubleshooting.md).
+
 Operational procedures for the DAIS26 VFM showcase: pre-demo preparation, rollback, DINOv2 fallback,
 and service principal setup.
 

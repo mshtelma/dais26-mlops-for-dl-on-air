@@ -14,6 +14,9 @@ Serving: Mosaic AI Model Serving GPU endpoints, SDK-driven.
 
 ![CI](https://github.com/mshtelma/dais26-mlops-for-dl-on-air/actions/workflows/ci.yml/badge.svg)
 
+📖 **Full documentation site: <https://mshtelma.github.io/dais26-mlops-for-dl-on-air/>** — ultra-detailed
+guides for every lane (DAB + air CLI) and the whole MLOps lifecycle. Best place to start.
+
 ## What this repo demonstrates
 
 | Job | Backbone output used | Purpose |
@@ -214,9 +217,12 @@ cached in a UC Volume by `scripts/pin_model_cache.py`.
 
 ## Documentation
 
+**Everything below is published as a navigable site: <https://mshtelma.github.io/dais26-mlops-for-dl-on-air/>**
+(MkDocs + Material, built from `docs/`). The Markdown sources:
+
 | Doc | Contents |
 |-----|----------|
-| [docs/README.md](docs/README.md) | DAB + AIR CLI quickstarts, prerequisites, operator lanes, troubleshooting |
+| [docs/](docs/README.md) → [site Get Started](https://mshtelma.github.io/dais26-mlops-for-dl-on-air/getting-started/overview/) | DAB + AIR CLI quickstarts, prerequisites, operator lanes, troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System diagram, BackboneInfo contract, two-phase deploy, @challenger→@champion, Mosaic AI comparison |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Pre-demo D-1 checklist, rollback procedure, DINOv2 fallback, service principal creation |
 | [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Latency and accuracy numbers (populated Phase 4) |

@@ -1,5 +1,9 @@
 # Talk: One frozen backbone, three jobs — MLOps for DL on AIR
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    The 45-minute talk outline (timing marks + slide-to-demo mapping). The deck content brief is
+    [Deck brief](DECK_BRIEF_DL_MLOPS.md); the architecture it presents is [Architecture](ARCHITECTURE.md).
+
 **Event:** Data + AI Summit 2026 (DAIS26), San Francisco, June 15-18
 **Duration:** 45 minutes
 **Subtitle:** Why deep learning is hard, why distributed DL is harder, why MLOps compounds the

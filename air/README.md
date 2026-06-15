@@ -1,5 +1,9 @@
 # air launch surface (Databricks AIR CLI)
 
+> 📖 Rendered, cross-linked version: **[air CLI lane](https://mshtelma.github.io/dais26-mlops-for-dl-on-air/lanes/air/)**
+> on the docs site (see also the [air quickstart](https://mshtelma.github.io/dais26-mlops-for-dl-on-air/getting-started/quickstart-air/)
+> and [lane parity](https://mshtelma.github.io/dais26-mlops-for-dl-on-air/lanes/overview/)). This file is the in-repo copy.
+
 This directory holds the [Databricks **AIR CLI**](https://preview.docs.databricks.com/pr-2058861/aws/en/machine-learning/ai-runtime/cli)
 (`air`) workloads for running the detector training and HPO sweep from a terminal
 — no notebook required, no traditional ML cluster involved. `air` submits a YAML

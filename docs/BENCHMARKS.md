@@ -1,9 +1,14 @@
 # Benchmarks
 
+!!! abstract "Part of the [DAIS26 documentation site](index.md)"
+    Accuracy / latency / recall numbers + protocols. Reproduce them via the
+    [MLOps Lifecycle](lifecycle/overview.md) jobs; accuracy provenance is the
+    [HPO campaign log](HPO.md).
+
 Performance numbers from Phase 4 validation runs. To be filled after `notebooks/07_latency_benchmark.py`
 completes on the production workspace.
 
-See the benchmark protocol in [ARCHITECTURE.md](ARCHITECTURE.md#e3e4-latency-benchmark-protocol) and
+See the latency protocol + pivot ladder in [Serve & AI Gateway](lifecycle/serve.md) and
 acceptance criteria E1, E3, E13, E15 in the plan.
 
 ---
