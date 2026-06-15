@@ -236,16 +236,3 @@ make discover-air     # Day 1 discovery gate
 make warmup           # pre-warm endpoints before demo
 make help             # full command list
 ```
-
-## Timeline
-
-| Milestone | Date |
-|-----------|------|
-| Phase 1: Foundation + Discovery | May 25-27 |
-| Phase 2: Training + Detection + Endpoint | May 28-29 |
-| Phase 3: Embeddings + Vector Search + Drift | Jun 1-3 |
-| Phase 4: Integration + Polish | Jun 4-5 |
-| Code freeze | Jun 8 (EOD) |
-| Phase 5: Talk prep | Jun 9-12 |
-| Demo rehearsal | Jun 13-14 |
-| DAIS26 talk | Jun 15, 2026 |
